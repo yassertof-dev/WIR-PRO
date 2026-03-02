@@ -11,7 +11,7 @@ import pythoncom
 import json
 from docxtpl import DocxTemplate
 from win32com.client import Dispatch
-from pypdf import PdfWriter
+from pypdf import PdfWriter, PdfReader
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QGroupBox, QFormLayout,
                              QTextEdit, QProgressBar, QListWidget, QListWidgetItem,
                              QFrame, QMenu, QSizePolicy, QStyleFactory,
-                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter)
+                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter, QInputDialog,
+                             QTableWidget, QTableWidgetItem, QHeaderView, QComboBox)
 from PyQt5.QtCore import (Qt, QDate, QThread, pyqtSignal, QLocale, QPoint, QMimeData, QObject, QStringListModel)
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QDragEnterEvent, QDropEvent, QWheelEvent, QIcon
 
@@ -207,7 +208,256 @@ class SuggestionsDB:
 # Instance عامة
 suggestions_db = SuggestionsDB()
 
+
+# -------------------- WIR Tracker Database (v2 - Matrix with History) --------------------
+import uuid as _uuid
+
+class WirTrackerDB:
+    """
+    قاعدة بيانات WIR Matrix Tracker.
+    كل Entry يمثل خلية في المصفوفة (plot + desc) وتحتوي على history من الـ Revisions.
+    الهيكل:
+    {
+      "AR": [
+        {
+          "id": uuid,
+          "plot": "101",
+          "desc": "تركيب سيراميك",
+          "discipline": "AR",
+          "archived": false,
+          "history": [
+            { "rev": 0, "ref": "TOL-...", "date": "...", "pdf_path": "...", "source": "auto", "archived": false }
+          ]
+        }
+      ]
+    }
+    """
+    VALID_CODES = {'AR', 'CV', 'MECH', 'ELEC'}
+
+    def __init__(self, db_path="wir_tracker.json"):
+        self.db_path = db_path
+        self.data = self._load()
+
+    def _load(self) -> dict:
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                # هجرة الهيكل القديم → الجديد لو لازم
+                return self._migrate(raw)
+            except Exception:
+                pass
+        return {code: [] for code in self.VALID_CODES}
+
+    def _migrate(self, raw: dict) -> dict:
+        """تحويل هيكل البيانات القديم (flat) إلى الجديد (history-based)"""
+        result = {code: [] for code in self.VALID_CODES}
+        for code in self.VALID_CODES:
+            entries = raw.get(code, [])
+            for e in entries:
+                # لو الـ entry بالهيكل الجديد فعلاً (فيه history)
+                if 'history' in e:
+                    result[code].append(e)
+                    continue
+                # هجرة من الهيكل القديم
+                result[code].append({
+                    'id': str(_uuid.uuid4()),
+                    'plot': str(e.get('plot', '')),
+                    'desc': e.get('desc', ''),
+                    'discipline': code,
+                    'archived': False,
+                    'history': [{
+                        'rev': 0,
+                        'ref': e.get('ref', ''),
+                        'date': e.get('date', ''),
+                        'pdf_path': e.get('pdf_path', ''),
+                        'source': 'auto',
+                        'archived': False
+                    }]
+                })
+        return result
+
+    def save(self):
+        try:
+            with open(self.db_path, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_error(f"Failed to save WIR tracker: {e}")
+
+    # ------------------------------------------------------------------
+    # البحث عن Entry موجود
+    # ------------------------------------------------------------------
+    def _find_entry(self, discipline_code: str, plot: str, desc: str):
+        """إيجاد Entry بالـ plot والـ desc (غير مؤرشف)"""
+        for e in self.data.get(discipline_code, []):
+            if e['plot'] == str(plot) and e['desc'] == desc and not e.get('archived', False):
+                return e
+        return None
+
+    def _find_entry_by_id(self, discipline_code: str, entry_id: str):
+        for e in self.data.get(discipline_code, []):
+            if e['id'] == entry_id:
+                return e
+        return None
+
+    # ------------------------------------------------------------------
+    # إضافة / تحديث من البرنامج الرئيسي (auto)
+    # ------------------------------------------------------------------
+    def add_entry(self, discipline_code: str, plot: str, desc: str,
+                  ref: str, date: str, pdf_path: str = "", source: str = "auto"):
+        """إضافة Revision جديد لـ entry موجود أو إنشاء entry جديد"""
+        if discipline_code not in self.VALID_CODES:
+            return
+        self.data.setdefault(discipline_code, [])
+        entry = self._find_entry(discipline_code, plot, desc)
+        if entry is None:
+            # إنشاء entry جديد
+            entry = {
+                'id': str(_uuid.uuid4()),
+                'plot': str(plot),
+                'desc': desc,
+                'discipline': discipline_code,
+                'archived': False,
+                'history': []
+            }
+            self.data[discipline_code].append(entry)
+
+        # تحديد رقم الـ Revision
+        active_revs = [h for h in entry['history'] if not h.get('archived', False)]
+        rev_num = len(active_revs)
+
+        # تجنب التكرار: لو نفس الـ ref موجود بالفعل لا نضيف مرة ثانية
+        existing_refs = {h['ref'] for h in entry['history']}
+        if ref and ref in existing_refs:
+            # فقط تحديث الـ pdf_path لو فارغ
+            for h in entry['history']:
+                if h['ref'] == ref and pdf_path:
+                    h['pdf_path'] = pdf_path
+            self.save()
+            return
+
+        entry['history'].append({
+            'rev': rev_num,
+            'ref': ref,
+            'date': date,
+            'pdf_path': pdf_path,
+            'source': source,
+            'archived': False
+        })
+        self.save()
+
+    # ------------------------------------------------------------------
+    # تعديل الوصف (Description) - يحدّث كل الـ entries المرتبطة
+    # ------------------------------------------------------------------
+    def update_desc(self, discipline_code: str, old_desc: str, new_desc: str):
+        """تعديل الوصف لكل الـ entries التي تحمل old_desc"""
+        for e in self.data.get(discipline_code, []):
+            if e['desc'] == old_desc:
+                e['desc'] = new_desc
+        self.save()
+
+    # ------------------------------------------------------------------
+    # تعديل Revision يدوي
+    # ------------------------------------------------------------------
+    def update_revision(self, discipline_code: str, entry_id: str, rev_idx: int,
+                        new_ref: str, new_date: str, new_pdf: str):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if not entry or rev_idx >= len(entry['history']):
+            return
+        h = entry['history'][rev_idx]
+        h['ref'] = new_ref
+        h['date'] = new_date
+        h['pdf_path'] = new_pdf
+        self.save()
+
+    # ------------------------------------------------------------------
+    # إضافة Revision يدوي
+    # ------------------------------------------------------------------
+    def add_revision(self, discipline_code: str, entry_id: str,
+                     ref: str, date: str, pdf_path: str, source: str = "manual"):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if not entry:
+            return
+        active_revs = [h for h in entry['history'] if not h.get('archived', False)]
+        rev_num = len(active_revs)
+        entry['history'].append({
+            'rev': rev_num,
+            'ref': ref,
+            'date': date,
+            'pdf_path': pdf_path,
+            'source': source,
+            'archived': False
+        })
+        self.save()
+
+    # ------------------------------------------------------------------
+    # أرشفة (Soft Delete)
+    # ------------------------------------------------------------------
+    def archive_entry(self, discipline_code: str, entry_id: str):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if entry:
+            entry['archived'] = True
+            self.save()
+
+    def restore_entry(self, discipline_code: str, entry_id: str):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if entry:
+            entry['archived'] = False
+            self.save()
+
+    def archive_revision(self, discipline_code: str, entry_id: str, rev_idx: int):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if entry and rev_idx < len(entry['history']):
+            entry['history'][rev_idx]['archived'] = True
+            self.save()
+
+    def restore_revision(self, discipline_code: str, entry_id: str, rev_idx: int):
+        entry = self._find_entry_by_id(discipline_code, entry_id)
+        if entry and rev_idx < len(entry['history']):
+            entry['history'][rev_idx]['archived'] = False
+            self.save()
+
+    # ------------------------------------------------------------------
+    # Query helpers
+    # ------------------------------------------------------------------
+    def get_active_entries(self, discipline_code: str) -> list:
+        """كل الـ entries غير المؤرشفة"""
+        return [e for e in self.data.get(discipline_code, [])
+                if not e.get('archived', False)]
+
+    def get_archived_entries(self, discipline_code: str) -> list:
+        """كل الـ entries المؤرشفة"""
+        return [e for e in self.data.get(discipline_code, [])
+                if e.get('archived', False)]
+
+    def get_unique_descs(self, discipline_code: str) -> list:
+        """أوصاف الطلبات الفريدة (غير مؤرشفة) بالترتيب"""
+        seen, result = set(), []
+        for e in self.get_active_entries(discipline_code):
+            if e['desc'] not in seen:
+                seen.add(e['desc'])
+                result.append(e['desc'])
+        return result
+
+    def get_unique_plots(self, discipline_code: str) -> list:
+        """أرقام القطع الفريدة مرتبة رقمياً (غير مؤرشفة)"""
+        plots = list({e['plot'] for e in self.get_active_entries(discipline_code)})
+        try:
+            plots.sort(key=lambda x: int(x))
+        except Exception:
+            plots.sort()
+        return plots
+
+    def get_entries(self, discipline_code: str) -> list:
+        """للتوافق مع الكود القديم - يرجع الـ active entries"""
+        return self.get_active_entries(discipline_code)
+
+
+wir_tracker_db = WirTrackerDB()
+
+
 # -------------------- Worker Thread --------------------
+
 class WorkerThread(QThread):
     task_done  = pyqtSignal(int, str, str)
     task_error = pyqtSignal(int, str)
@@ -223,18 +473,71 @@ class WorkerThread(QThread):
         name = f"{base}-{plot}-{suffix}.pdf" if suffix else f"{base}-{plot}.pdf"
         return os.path.join(output_dir, name)
 
-    def _merge_pdfs(self, temp_pdf, attach_paths, final_pdf):
-        """دمج PDFs بطريقة آمنة مع كتم رسائل pypdf"""
+    def _merge_pdfs(self, temp_pdf, attach_paths_with_pages, final_pdf):
+        """دمج PDFs مع إمكانية استخراج صفحات محددة"""
         merger = PdfWriter()
+        readers = []  # نحتفظ بالـ readers مفتوحة حتى بعد الكتابة
         try:
             merger.append(temp_pdf)
-            for ap in attach_paths:
-                if ap and os.path.exists(ap):
+            for ap, pages_range in attach_paths_with_pages:
+                if not ap or not os.path.exists(ap):
+                    continue
+                if pages_range and pages_range.strip():
+                    # تنظيف النطاق: استبدال الفواصل المختلفة بفواصل إنجليزية
+                    cleaned_range = pages_range.replace('،', ',').replace('.', ',').replace('*', ',').replace(' ', '')
+                    try:
+                        reader = PdfReader(ap)
+                        readers.append(reader)  # نحتفظ بالـ reader مفتوحاً
+                        total_pages = len(reader.pages)
+                        pages_to_extract = []
+                        for part in cleaned_range.split(','):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            if '-' in part:
+                                # معالجة النطاق مثل 1-3
+                                try:
+                                    start, end = part.split('-')
+                                    start = int(start.strip()) - 1
+                                    end = int(end.strip()) - 1
+                                    if start < 0:
+                                        start = 0
+                                    if end >= total_pages:
+                                        end = total_pages - 1
+                                    if start <= end:
+                                        pages_to_extract.extend(range(start, end+1))
+                                except ValueError:
+                                    # إذا كان التنسيق غير صحيح، تجاهل هذا الجزء
+                                    continue
+                            else:
+                                if part.isdigit():
+                                    p = int(part) - 1
+                                    if 0 <= p < total_pages:
+                                        pages_to_extract.append(p)
+                        # إزالة التكرار والترتيب
+                        pages_to_extract = sorted(set(pages_to_extract))
+                        if pages_to_extract:
+                            for p in pages_to_extract:
+                                merger.add_page(reader.pages[p])  # ← الإصلاح: add_page بدل append
+                        else:
+                            # إذا لم يتم استخراج أي صفحة، نستخدم الملف كاملاً (تحسباً)
+                            merger.append(ap)
+                    except Exception as e:
+                        log_error(f"خطأ في استخراج الصفحات من {ap}: {e}")
+                        # في حالة الخطأ، ندمج الملف كاملاً
+                        merger.append(ap)
+                else:
                     merger.append(ap)
             with open(final_pdf, 'wb') as f:
                 merger.write(f)
         finally:
             merger.close()
+            # إغلاق جميع الـ readers بعد الكتابة
+            for r in readers:
+                try:
+                    r.stream.close()
+                except Exception:
+                    pass
 
     def _cleanup(self, *paths):
         for p in paths:
@@ -267,7 +570,8 @@ class WorkerThread(QThread):
                     ref          = task['ref']
                     name         = task['name']
                     desc         = task['desc']
-                    attach_paths = task['attach_paths']
+                    attach_paths = task['attach_paths']          # قائمة بالمسارات
+                    attach_pages = task.get('attach_pages', {})  # dict {path: pages_range}
                     rev          = task['rev']
                     plot         = task['plot']
                     suffix       = task.get('suffix', '')
@@ -299,7 +603,9 @@ class WorkerThread(QThread):
                         return
 
                     final_pdf = self._build_final_path(output_dir, ref, rev, plot, suffix)
-                    self._merge_pdfs(temp_pdf, attach_paths, final_pdf)
+                    # تجهيز قائمة المرفقات مع نطاق الصفحات
+                    attach_with_pages = [(ap, attach_pages.get(ap, '')) for ap in attach_paths]
+                    self._merge_pdfs(temp_pdf, attach_with_pages, final_pdf)
                     self._cleanup(temp_docx, temp_pdf)
 
                     self.task_done.emit(task_index, f"تم: {os.path.basename(final_pdf)}", final_pdf)
@@ -337,6 +643,7 @@ class ProcessThread(QThread):
         self._total        = 0
         self._error        = None
         self.start_time    = None
+        self._completed_tasks = []  # list of (task_data, pdf_path)
 
     def stop(self):
         self._stop_event.set()
@@ -358,11 +665,13 @@ class ProcessThread(QThread):
                     manual_ref = row.get('manual_ref', None)
                     desc = row['desc']
                     attach_paths = row['attach_paths']
+                    attach_pages = row.get('attach_pages', {})  # dict {path: pages_range}
                     rev = row['revision']
                     suffix_raw = row.get('suffix', '')
 
-                    # تنظيف suffix من الأرقام العربية
-                    suffix_clean = to_english_digits(suffix_raw)
+                    # تنظيف suffix من الأرقام العربية واستبدال الأحرف غير الصالحة في أسماء الملفات بمسافة
+                    suffix_clean = re.sub(r'[\r\n\t/:\\*?"<>|]', " ", to_english_digits(suffix_raw))
+                    suffix_clean = re.sub(r' {2,}', ' ', suffix_clean).strip()
 
                     if rev > 0:
                         plots_list = [row['manual_plot']]
@@ -380,11 +689,13 @@ class ProcessThread(QThread):
                         tasks.append({
                             'ref': ref_clean, 'code': code, 'name': name,
                             'desc': desc, 'attach_paths': attach_paths,
+                            'attach_pages': attach_pages,   # تمرير معلومات الصفحات
                             'rev': rev, 'plot': p_num_clean, 'suffix': suffix_clean
                         })
                         if not manual_mode:
                             serial += 1
 
+            self._tasks_list = tasks  # للرجوع إليه في الـ tracker
             self._total = len(tasks)
             if self._total == 0:
                 self.finished.emit(False, "لا توجد ملفات لتوليدها")
@@ -422,8 +733,9 @@ class ProcessThread(QThread):
             else:
                 self.progress_update.emit(self._total, self._total, "اكتمل توليد جميع الملفات ✓", "")
 
-                # حفظ الاقتراحات الذكية
+                # حفظ الاقتراحات الذكية والـ tracker
                 self._save_suggestions()
+                self._save_to_tracker()
                 self.finished.emit(True, f"تم توليد {self._total} ملف بنجاح!")
 
         except Exception as e:
@@ -437,6 +749,8 @@ class ProcessThread(QThread):
         with self._lock:
             self._processed += 1
             self.created_files.append(final_file)
+            if hasattr(self, '_tasks_list') and task_index < len(self._tasks_list):
+                self._completed_tasks.append((self._tasks_list[task_index], final_file))
             current = self._processed
             total = self._total
 
@@ -463,6 +777,23 @@ class ProcessThread(QThread):
         with self._lock:
             self._error = error
         self._stop_event.set()
+
+
+    def _save_to_tracker(self):
+        """تسجيل الـ WIRs المولدة في قاعدة بيانات المتابعة"""
+        try:
+            for task_data, pdf_path in self._completed_tasks:
+                wir_tracker_db.add_entry(
+                    discipline_code=task_data['code'],
+                    plot=task_data['plot'],
+                    desc=task_data['desc'],
+                    ref=task_data['ref'],
+                    date=self.data['date'],
+                    pdf_path=pdf_path,
+                    source='auto'
+                )
+        except Exception as e:
+            log_error(f"Failed to save to WIR tracker: {e}")
 
     def _save_suggestions(self):
         """حفظ الاقتراحات الذكية مرة واحدة بعد انتهاء التوليد"""
@@ -1174,8 +1505,12 @@ class DisciplineTab(QWidget):
 
         def validate_plots_input(text):
             cursor_pos = plots_input.cursorPosition()
-            # السماح بالأرقام والمسافات والشرطات والنقاط والنجوم والفواصل (العربية والإنجليزية)
-            filtered_text = ''.join(c for c in text if c.isdigit() or c in ' -.,*،')
+            # استبدال فواصل الأسطر والتابات بمسافة (لدعم لصق من Excel)
+            text2 = re.sub(r'[\r\n\t]', ' ', text)
+            # السماح بالأرقام والمسافات والشرطات والنقاط والنجوم والفواصل
+            filtered_text = ''.join(c for c in text2 if c.isdigit() or c in ' -.,*،')
+            # تقليص مسافات متعددة لمسافة واحدة
+            filtered_text = re.sub(r' {2,}', ' ', filtered_text)
             if filtered_text != text:
                 plots_input.setText(filtered_text)
                 plots_input.setCursorPosition(min(cursor_pos, len(filtered_text)))
@@ -1245,6 +1580,16 @@ class DisciplineTab(QWidget):
         suffix_edit.setMinimumWidth(220)
         suffix_edit.textChanged.connect(self.update_counter)
         suffix_edit.textChanged.connect(self.update_current_row_summary)
+        # تنظيف النص عند التغيير (إزالة الأسطر الجديدة والأحرف غير الصالحة)
+        def _sanitize_suffix(text):
+            # استبدال الأحرف غير الصالحة بمسافة ثم تقليص المسافات
+            clean = re.sub(r'[\r\n\t/:\\*?"<>|]', ' ', text)
+            clean = re.sub(r' {2,}', ' ', clean).strip()
+            if clean != text:
+                suffix_edit.blockSignals(True)
+                suffix_edit.setText(clean)
+                suffix_edit.blockSignals(False)
+        suffix_edit.textChanged.connect(_sanitize_suffix)
         suffix_edit.editingFinished.connect(lambda: self._add_to_suffix_history(suffix_edit.text().strip()))
         # ===== Dropdown تلقائي عند الضغط على suffix_edit =====
         from PyQt5.QtCore import QSize as _QSize, QTimer as _QTimer
@@ -1450,7 +1795,8 @@ class DisciplineTab(QWidget):
         attach_buttons_layout.addStretch()
 
         # ===== منطقة المرفقات مع إعادة الترتيب =====
-        attach_paths = []
+        attach_paths = []          # قائمة بالمسارات فقط
+        attach_pages = {}          # dict {path: pages_range}
 
         # قائمة المرفقات المخصصة
         # DropZone يلف الـ list ويستقبل الـ drops
@@ -1526,14 +1872,23 @@ class DisciplineTab(QWidget):
         _show_placeholder()
 
         def _sync_paths_from_list():
-            """مزامنة attach_paths مع ترتيب الـ list"""
+            """مزامنة attach_paths و attach_pages مع ترتيب الـ list"""
             attach_paths.clear()
+            # لا نمسح attach_pages بالكامل، بل نبني dict جديد
+            new_pages = {}
             for i in range(attach_list_widget.count()):
                 item = attach_list_widget.item(i)
                 if item:
                     d = item.data(Qt.UserRole)
                     if d and d != _PLACEHOLDER_KEY:
                         attach_paths.append(d)
+                        # استرجاع الصفحات من البيانات
+                        pages = item.data(Qt.UserRole + 3) or ""
+                        if pages:
+                            new_pages[d] = pages
+            # تحديث attach_pages
+            attach_pages.clear()
+            attach_pages.update(new_pages)
 
         DZ_NORMAL = """
         QWidget {
@@ -1631,11 +1986,15 @@ class DisciplineTab(QWidget):
             it_b = attach_list_widget.item(new_row)
             path_a = it_a.data(Qt.UserRole)
             path_b = it_b.data(Qt.UserRole)
+            pages_a = it_a.data(Qt.UserRole + 3) or ""
+            pages_b = it_b.data(Qt.UserRole + 3) or ""
             tip_a  = it_a.toolTip()
             tip_b  = it_b.toolTip()
             it_a.setData(Qt.UserRole, path_b)
+            it_a.setData(Qt.UserRole + 3, pages_b)
             it_a.setToolTip(tip_b)
             it_b.setData(Qt.UserRole, path_a)
+            it_b.setData(Qt.UserRole + 3, pages_a)
             it_b.setToolTip(tip_a)
             attach_list_widget.setCurrentRow(new_row)
             _rebuild_widgets()
@@ -1648,8 +2007,9 @@ class DisciplineTab(QWidget):
             # إضافة tooltip للمسار الكامل
             it = attach_list_widget.item(row)
             path = it.data(Qt.UserRole) if it else ""
+            pages_range = it.data(Qt.UserRole + 3) or ""
             if path and path != _PLACEHOLDER_KEY:
-                w.setToolTip(path)  # ← هنا إضافة tooltip للصف كامل
+                w.setToolTip(path)
 
             l = QHBoxLayout(w)
             l.setContentsMargins(4, 0, 4, 0)
@@ -1663,12 +2023,41 @@ class DisciplineTab(QWidget):
             ico = QLabel("📄")
             ico.setStyleSheet("background: transparent; font-size: 12px;")
             ico.setFixedWidth(18)
-            ico.setAttribute(Qt.WA_TransparentForMouseEvents)  # ← شفاف للماوس
+            ico.setAttribute(Qt.WA_TransparentForMouseEvents)
 
             name_lbl = QLabel(os.path.basename(path))
             name_lbl.setToolTip(path)
             name_lbl.setStyleSheet("font-size: 12px; color: #1e293b; background: transparent;")
-            name_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)  # ← شفاف للماوس
+            name_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+            # حقل إدخال الصفحات (مباشر) - مع زيادة العرض
+            pages_edit = QLineEdit()
+            pages_edit.setFixedWidth(80)  # زيادة العرض أكثر
+            pages_edit.setFixedHeight(20)
+            pages_edit.setPlaceholderText("صفحات")
+            pages_edit.setText(pages_range)
+            pages_edit.setStyleSheet("""
+                QLineEdit {
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    padding: 2px 4px;
+                    background: white;
+                }
+                QLineEdit:focus { border-color: #3b82f6; }
+            """)
+
+            def update_pages():
+                new_range = pages_edit.text().strip()
+                # التحقق من الصحة: يسمح بالأرقام والشرطات والفواصل (العربية والإنجليزية) والنقاط والمسافات
+                if new_range and not re.match(r'^[\d\-\s,،.*]+$', new_range):
+                    QMessageBox.warning(self, "خطأ", "الرجاء إدخال أرقام وفواصل وشرطات ونقاط فقط.")
+                    pages_edit.setText(pages_range)  # إعادة القيمة القديمة
+                    return
+                it.setData(Qt.UserRole + 3, new_range)
+                _sync_paths_from_list()
+
+            pages_edit.editingFinished.connect(update_pages)
 
             btn_up   = QPushButton("▲")
             btn_up.setStyleSheet(BTN_ARROW)
@@ -1685,6 +2074,7 @@ class DisciplineTab(QWidget):
             l.addWidget(lbl_num)
             l.addWidget(ico)
             l.addWidget(name_lbl, 1)
+            l.addWidget(pages_edit)
             l.addWidget(btn_up)
             l.addWidget(btn_down)
 
@@ -1717,6 +2107,7 @@ class DisciplineTab(QWidget):
             _hide_placeholder()
             item = QListWidgetItem()
             item.setData(Qt.UserRole, file_path)
+            item.setData(Qt.UserRole + 3, "")  # لا نطاق افتراضي
             item.setToolTip(file_path)
             # تمكين السحب + التحديد + التمكين
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
@@ -1758,6 +2149,7 @@ class DisciplineTab(QWidget):
         def clear_attachments():
             attach_list_widget.clear()
             attach_paths.clear()
+            attach_pages.clear()
             _show_placeholder()
             _refresh_zone_style()
 
@@ -1803,7 +2195,7 @@ class DisciplineTab(QWidget):
         attach_layout.addWidget(drop_zone)
 
         # hint الترتيب - ثابت تحت الـ list
-        order_hint = QLabel("☰  اسحب للترتيب  |  Del للحذف")
+        order_hint = QLabel("☰  اسحب للترتيب  |  Del للحذف  |  اكتب رقم الصفحات في المربع")
         order_hint.setAlignment(Qt.AlignCenter)
         order_hint.setStyleSheet("color: #64748b; font-size: 13px; background: transparent; padding: 1px;")
         order_hint.setVisible(False)
@@ -1882,7 +2274,7 @@ class DisciplineTab(QWidget):
         # إضافة الحاوية إلى التمرير
         self.scroll_layout.addWidget(row_container)
 
-        # تخزين المراجع
+        # تخزين المراجع (مع attach_pages)
         self.rows.append({
             'container': row_container,
             'summary_label': summary_label,
@@ -1891,6 +2283,7 @@ class DisciplineTab(QWidget):
             'desc': desc_edit,
             'suggestions_list': suggestions_list,
             'attach_paths': attach_paths,
+            'attach_pages': attach_pages,      # dict للمسارات مع الصفحات
             'radio_all': radio_all,
             'plots_input': plots_input,
             'revision': revision_spin,
@@ -1898,7 +2291,8 @@ class DisciplineTab(QWidget):
             'manual_plot_input': manual_plot_input,
             'suffix': suffix_edit,
             'attach_list_widget': attach_list_widget,
-            'update_suggestions': update_suggestions_for_row
+            'update_suggestions': update_suggestions_for_row,
+            '_rebuild_widgets': _rebuild_widgets   # حفظ المرجع لاستخدامه في استعادة الجلسة
         })
 
         # تحديث الملخص الأولي
@@ -2000,8 +2394,6 @@ class DisciplineTab(QWidget):
             if 'update_suggestions' in row:
                 row['update_suggestions']()
 
-        # لا نعرض رسالة "تم الحذف" - نكتفي بالتأكيد
-
     def update_counter(self):
         if self.main_window:
             self.main_window.calculate_expected_files()
@@ -2048,7 +2440,7 @@ class DisciplineTab(QWidget):
                 if plots_text:
                     summary_parts.append(f"قطع: {plots_text}")
 
-        suffix_text = row['suffix'].text().strip()
+        suffix_text = re.sub(r'[\r\n\t]', ' ', row['suffix'].text()).strip()
         if suffix_text:
             summary_parts.append(f"({suffix_text})")
 
@@ -2081,11 +2473,863 @@ class DisciplineTab(QWidget):
         if self.main_window:
             self.main_window.calculate_expected_files()
 
+
+# -------------------- WIR Tracker UI (v2 - Matrix with History) --------------------
+
+# ---- ألوان الـ Tracker ----
+TRACKER_COLOR_AUTO     = QColor('#16a34a')   # أخضر  - auto
+TRACKER_COLOR_MANUAL   = QColor('#1d4ed8')   # أزرق  - manual
+TRACKER_COLOR_ARCHIVED = QColor('#94a3b8')   # رمادي - archived
+TRACKER_COLOR_HEADER   = QColor('#1e293b')   # داكن  - header
+
+
+# ------------------------------------------------------------------
+# نافذة تعديل Revision أو إضافة واحد جديد
+# ------------------------------------------------------------------
+class RevisionEditDialog(QDialog):
+    """نافذة إضافة أو تعديل Revision واحد"""
+    def __init__(self, parent=None, existing: dict = None, title="إضافة Revision"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setFixedWidth(460)
+
+        FIELD = ("QLineEdit { border:1.5px solid #94a3b8; border-radius:6px;"
+                 " padding:5px 8px; font-size:13px; background:white; }"
+                 " QLineEdit:focus { border:2px solid #3b82f6; }")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.ref_edit  = QLineEdit()
+        self.ref_edit.setPlaceholderText("TOL-ADW-WIR-AR-001")
+        self.ref_edit.setStyleSheet(FIELD)
+
+        self.date_edit = QLineEdit()
+        self.date_edit.setPlaceholderText("dd/mm/yyyy")
+        self.date_edit.setText(datetime.date.today().strftime("%d/%m/%Y"))
+        self.date_edit.setStyleSheet(FIELD)
+
+        pdf_row = QHBoxLayout()
+        self.pdf_edit  = QLineEdit()
+        self.pdf_edit.setPlaceholderText("مسار PDF (اختياري)")
+        self.pdf_edit.setStyleSheet(FIELD)
+        btn_browse = QPushButton("📂")
+        btn_browse.setFixedSize(30, 30)
+        btn_browse.setToolTip("تصفح")
+        btn_browse.setCursor(Qt.PointingHandCursor)
+        btn_browse.setStyleSheet("border:1px solid #94a3b8; border-radius:5px; background:#f8fafc;")
+        btn_browse.clicked.connect(self._browse)
+        pdf_row.addWidget(self.pdf_edit)
+        pdf_row.addWidget(btn_browse)
+        pdf_w = QWidget(); pdf_w.setLayout(pdf_row)
+
+        form.addRow("رقم الـ WIR (REF):", self.ref_edit)
+        form.addRow("التاريخ:",            self.date_edit)
+        form.addRow("ملف PDF:",            pdf_w)
+
+        layout.addLayout(form)
+
+        if existing:
+            self.ref_edit.setText(existing.get('ref', ''))
+            self.date_edit.setText(existing.get('date', ''))
+            self.pdf_edit.setText(existing.get('pdf_path', ''))
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("✅  حفظ")
+        btn_ok.setFixedHeight(34)
+        btn_ok.setStyleSheet("QPushButton{background:#16a34a;color:white;font-weight:bold;"
+                             "font-size:13px;border-radius:7px;border:none;padding:0 14px;}"
+                             "QPushButton:hover{background:#15803d;}")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("إلغاء")
+        btn_cancel.setFixedHeight(34)
+        btn_cancel.setStyleSheet("QPushButton{background:#e2e8f0;color:#334155;font-size:13px;"
+                                 "border-radius:7px;border:none;padding:0 14px;}"
+                                 "QPushButton:hover{background:#cbd5e1;}")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'اختر PDF', '', 'PDF (*.pdf)')
+        if path:
+            self.pdf_edit.setText(path)
+
+    def get_data(self) -> dict:
+        return {
+            'ref':      self.ref_edit.text().strip(),
+            'date':     self.date_edit.text().strip(),
+            'pdf_path': self.pdf_edit.text().strip()
+        }
+
+
+# ------------------------------------------------------------------
+# نافذة عرض وإدارة الـ History لخلية معينة
+# ------------------------------------------------------------------
+class HistoryDialog(QDialog):
+    """عرض كل الـ Revisions الخاصة بخلية (plot + desc) مع إمكانية الإدارة"""
+    def __init__(self, discipline_code: str, entry: dict, parent=None):
+        super().__init__(parent)
+        self.code  = discipline_code
+        self.entry = entry
+        self.setWindowTitle(f"السجل التاريخي — القطعة {entry['plot']} | {entry['desc']}")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setMinimumSize(700, 400)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # معلومات الخلية
+        info = QLabel(f"التخصص: {discipline_code}  |  القطعة: {entry['plot']}  |  الوصف: {entry['desc']}")
+        info.setStyleSheet("font-size:13px; font-weight:bold; color:#1e293b;"
+                           " background:#f1f5f9; border-radius:6px; padding:6px 10px;")
+        layout.addWidget(info)
+
+        # أزرار الأدوات
+        tb = QHBoxLayout()
+        btn_add = QPushButton("＋  Revision جديد")
+        btn_add.setCursor(Qt.PointingHandCursor)
+        btn_add.setStyleSheet("QPushButton{background:#2e7d32;color:white;font-weight:bold;"
+                              "font-size:13px;padding:5px 12px;border-radius:6px;border:none;}"
+                              "QPushButton:hover{background:#1b5e20;}")
+        btn_add.clicked.connect(self._add_revision)
+
+        btn_edit = QPushButton("✏️  تعديل")
+        btn_edit.setCursor(Qt.PointingHandCursor)
+        btn_edit.setStyleSheet("QPushButton{background:#0288d1;color:white;font-size:13px;"
+                               "padding:5px 12px;border-radius:6px;border:none;}"
+                               "QPushButton:hover{background:#0277bd;}")
+        btn_edit.clicked.connect(self._edit_revision)
+
+        btn_archive = QPushButton("🗄  أرشفة")
+        btn_archive.setCursor(Qt.PointingHandCursor)
+        btn_archive.setStyleSheet("QPushButton{background:#b45309;color:white;font-size:13px;"
+                                  "padding:5px 12px;border-radius:6px;border:none;}"
+                                  "QPushButton:hover{background:#92400e;}")
+        btn_archive.clicked.connect(self._archive_revision)
+
+        btn_restore = QPushButton("↩  استرجاع")
+        btn_restore.setCursor(Qt.PointingHandCursor)
+        btn_restore.setStyleSheet("QPushButton{background:#475569;color:white;font-size:13px;"
+                                  "padding:5px 12px;border-radius:6px;border:none;}"
+                                  "QPushButton:hover{background:#334155;}")
+        btn_restore.clicked.connect(self._restore_revision)
+
+        tb.addWidget(btn_add)
+        tb.addWidget(btn_edit)
+        tb.addWidget(btn_archive)
+        tb.addWidget(btn_restore)
+        tb.addStretch()
+        layout.addLayout(tb)
+
+        # جدول الـ Revisions
+        self.table = QTableWidget()
+        self.table.setLayoutDirection(Qt.RightToLeft)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(['Rev', 'REF', 'التاريخ', 'المصدر', 'الحالة', 'فتح PDF'])
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setStyleSheet("""
+            QTableWidget { border:1px solid #e2e8f0; border-radius:8px;
+                           background:white; font-size:13px; color:#1e293b; }
+            QTableWidget::item { padding:6px; color:#1e293b; }
+            QTableWidget::item:selected { background:#dbeafe; color:#1e40af; }
+            QHeaderView::section { background:#1e293b; color:white; padding:6px;
+                                   font-size:12px; font-weight:bold; border:none; }
+            QTableWidget::item:alternate { background:#f8fafc; }
+        """)
+        self.table.doubleClicked.connect(lambda: self._edit_revision())
+        layout.addWidget(self.table)
+
+        # زرار إغلاق
+        btn_close = QPushButton("إغلاق")
+        btn_close.setFixedHeight(34)
+        btn_close.setStyleSheet("QPushButton{background:#e2e8f0;color:#334155;font-size:13px;"
+                                "border-radius:7px;border:none;padding:0 20px;}"
+                                "QPushButton:hover{background:#cbd5e1;}")
+        btn_close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(btn_close)
+        layout.addLayout(row)
+
+        self._populate()
+
+    def _populate(self):
+        """ملء جدول الـ Revisions"""
+        history = self.entry.get('history', [])
+        self.table.setRowCount(len(history))
+        for i, h in enumerate(history):
+            archived = h.get('archived', False)
+            source   = h.get('source', 'manual')
+
+            def _item(txt, color=None):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignCenter)
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if archived:
+                    it.setForeground(TRACKER_COLOR_ARCHIVED)
+                elif color:
+                    it.setForeground(color)
+                return it
+
+            src_color = TRACKER_COLOR_AUTO if source == 'auto' else TRACKER_COLOR_MANUAL
+            self.table.setItem(i, 0, _item(str(h.get('rev', i))))
+            self.table.setItem(i, 1, _item(h.get('ref', '')))
+            self.table.setItem(i, 2, _item(h.get('date', '')))
+            self.table.setItem(i, 3, _item('تلقائي' if source == 'auto' else 'يدوي', src_color))
+            self.table.setItem(i, 4, _item('مؤرشف' if archived else 'نشط'))
+
+            # زرار فتح PDF
+            pdf_path = h.get('pdf_path', '')
+            if pdf_path and os.path.exists(pdf_path):
+                btn = QPushButton("📄  فتح")
+                btn.setStyleSheet("QPushButton{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;"
+                                  "border-radius:5px;font-size:12px;padding:2px 8px;}"
+                                  "QPushButton:hover{background:#dbeafe;}")
+                btn.clicked.connect(lambda _, p=pdf_path: os.startfile(p))
+                self.table.setCellWidget(i, 5, btn)
+            else:
+                self.table.setItem(i, 5, _item('—'))
+
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(1, 200)
+
+    def _selected_rev_idx(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "تنبيه", "اختر Revision أولاً")
+            return None
+        return row
+
+    def _add_revision(self):
+        dlg = RevisionEditDialog(self, title="إضافة Revision جديد")
+        if dlg.exec_() == QDialog.Accepted:
+            d = dlg.get_data()
+            wir_tracker_db.add_revision(
+                self.code, self.entry['id'],
+                d['ref'], d['date'], d['pdf_path'], source='manual'
+            )
+            # تحديث الـ entry object من قاعدة البيانات
+            self.entry = wir_tracker_db._find_entry_by_id(self.code, self.entry['id'])
+            self._populate()
+
+    def _edit_revision(self):
+        idx = self._selected_rev_idx()
+        if idx is None:
+            return
+        h = self.entry['history'][idx]
+        dlg = RevisionEditDialog(self, existing=h, title="تعديل Revision")
+        if dlg.exec_() == QDialog.Accepted:
+            d = dlg.get_data()
+            wir_tracker_db.update_revision(
+                self.code, self.entry['id'], idx,
+                d['ref'], d['date'], d['pdf_path']
+            )
+            self.entry = wir_tracker_db._find_entry_by_id(self.code, self.entry['id'])
+            self._populate()
+
+    def _archive_revision(self):
+        idx = self._selected_rev_idx()
+        if idx is None:
+            return
+        reply = QMessageBox.question(self, "تأكيد", "أرشفة هذا الـ Revision؟",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            wir_tracker_db.archive_revision(self.code, self.entry['id'], idx)
+            self.entry = wir_tracker_db._find_entry_by_id(self.code, self.entry['id'])
+            self._populate()
+
+    def _restore_revision(self):
+        idx = self._selected_rev_idx()
+        if idx is None:
+            return
+        wir_tracker_db.restore_revision(self.code, self.entry['id'], idx)
+        self.entry = wir_tracker_db._find_entry_by_id(self.code, self.entry['id'])
+        self._populate()
+
+
+# ------------------------------------------------------------------
+# نافذة إضافة Entry يدوي جديد (plot + desc + أول revision)
+# ------------------------------------------------------------------
+class AddWirDialog(QDialog):
+    """نافذة إضافة WIR يدوي جديد"""
+    DISC_NAMES = {'AR': 'معماري', 'CV': 'مدني', 'MECH': 'ميكانيكا', 'ELEC': 'كهرباء'}
+
+    def __init__(self, discipline_code, discipline_name, parent=None, title="إضافة WIR يدوي"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setFixedWidth(480)
+
+        FIELD = ("QLineEdit,QComboBox{border:1.5px solid #94a3b8;border-radius:6px;"
+                 "padding:5px 8px;font-size:13px;background:white;}"
+                 "QLineEdit:focus,QComboBox:focus{border:2px solid #3b82f6;}")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        # التخصص
+        self.disc_combo = QComboBox()
+        for code, name in self.DISC_NAMES.items():
+            self.disc_combo.addItem(name, code)
+        idx = self.disc_combo.findData(discipline_code)
+        if idx >= 0:
+            self.disc_combo.setCurrentIndex(idx)
+        self.disc_combo.setStyleSheet(FIELD)
+        form.addRow("التخصص:", self.disc_combo)
+
+        # رقم القطعة
+        self.plot_edit = QLineEdit()
+        self.plot_edit.setPlaceholderText("مثال: 101")
+        self.plot_edit.setStyleSheet(FIELD)
+        form.addRow("رقم القطعة:", self.plot_edit)
+
+        # وصف النشاط
+        self.desc_edit = QLineEdit()
+        self.desc_edit.setPlaceholderText("مثال: تركيب سيراميك حمامات")
+        self.desc_edit.setStyleSheet(FIELD)
+        form.addRow("وصف النشاط:", self.desc_edit)
+
+        # أول Revision
+        self.ref_edit = QLineEdit()
+        self.ref_edit.setPlaceholderText("TOL-ADW-WIR-AR-001 (اختياري)")
+        self.ref_edit.setStyleSheet(FIELD)
+        form.addRow("رقم الـ WIR:", self.ref_edit)
+
+        self.date_edit_dlg = QLineEdit()
+        self.date_edit_dlg.setPlaceholderText("dd/mm/yyyy")
+        self.date_edit_dlg.setText(datetime.date.today().strftime("%d/%m/%Y"))
+        self.date_edit_dlg.setStyleSheet(FIELD)
+        form.addRow("التاريخ:", self.date_edit_dlg)
+
+        pdf_row = QHBoxLayout()
+        self.pdf_edit = QLineEdit()
+        self.pdf_edit.setPlaceholderText("مسار PDF (اختياري)")
+        self.pdf_edit.setStyleSheet(FIELD)
+        btn_browse = QPushButton("📂")
+        btn_browse.setFixedSize(30, 30)
+        btn_browse.setCursor(Qt.PointingHandCursor)
+        btn_browse.setStyleSheet("border:1px solid #94a3b8; border-radius:5px; background:#f8fafc;")
+        btn_browse.clicked.connect(self._browse_pdf)
+        pdf_row.addWidget(self.pdf_edit)
+        pdf_row.addWidget(btn_browse)
+        pdf_w = QWidget(); pdf_w.setLayout(pdf_row)
+        form.addRow("ملف PDF:", pdf_w)
+
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("✅  حفظ")
+        btn_ok.setFixedHeight(34)
+        btn_ok.setStyleSheet("QPushButton{background:#16a34a;color:white;font-weight:bold;"
+                             "font-size:13px;border-radius:7px;border:none;padding:0 14px;}"
+                             "QPushButton:hover{background:#15803d;}")
+        btn_ok.clicked.connect(self._on_accept)
+        btn_cancel = QPushButton("إلغاء")
+        btn_cancel.setFixedHeight(34)
+        btn_cancel.setStyleSheet("QPushButton{background:#e2e8f0;color:#334155;font-size:13px;"
+                                 "border-radius:7px;border:none;padding:0 14px;}"
+                                 "QPushButton:hover{background:#cbd5e1;}")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_ok)
+        layout.addLayout(btn_layout)
+
+    def _browse_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'اختر PDF', '', 'PDF (*.pdf)')
+        if path:
+            self.pdf_edit.setText(path)
+
+    def _on_accept(self):
+        if not self.plot_edit.text().strip():
+            QMessageBox.warning(self, "تنبيه", "برجاء إدخال رقم القطعة")
+            return
+        if not self.desc_edit.text().strip():
+            QMessageBox.warning(self, "تنبيه", "برجاء إدخال وصف النشاط")
+            return
+        self.accept()
+
+    def get_data(self) -> dict:
+        return {
+            'code':     self.disc_combo.currentData(),
+            'plot':     self.plot_edit.text().strip(),
+            'desc':     self.desc_edit.text().strip(),
+            'ref':      self.ref_edit.text().strip(),
+            'date':     self.date_edit_dlg.text().strip(),
+            'pdf_path': self.pdf_edit.text().strip()
+        }
+
+
+# ------------------------------------------------------------------
+# تبويب تخصص واحد داخل الـ Tracker (Matrix Pivot)
+# ------------------------------------------------------------------
+class WirTrackerTab(QWidget):
+    """جدول Matrix لتخصص واحد"""
+
+    def __init__(self, code: str, name: str):
+        super().__init__()
+        self.code = code
+        self.name = name
+        self._init_ui()
+        self.refresh()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # --- شريط الأدوات ---
+        toolbar = QWidget()
+        toolbar.setStyleSheet("background:#f8f9fa; border:1px solid #e9ecef; border-radius:8px;")
+        tb = QHBoxLayout(toolbar)
+        tb.setContentsMargins(10, 6, 10, 6)
+
+        def _btn(text, color, hover):
+            b = QPushButton(text)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(f"QPushButton{{background:{color};color:white;font-size:13px;"
+                            f"padding:5px 10px;border-radius:6px;border:none;font-weight:bold;}}"
+                            f"QPushButton:hover{{background:{hover};}}")
+            return b
+
+        self.btn_add     = _btn("＋  إضافة يدوي", "#2e7d32", "#1b5e20")
+        self.btn_archive = _btn("🗄  أرشفة", "#b45309", "#92400e")
+        self.btn_restore = _btn("↩  استرجاع", "#475569", "#334155")
+        self.btn_export  = _btn("📊  تصدير Excel", "#166534", "#15803d")
+
+        self.btn_add.clicked.connect(self.add_manual)
+        self.btn_archive.clicked.connect(self.archive_selected)
+        self.btn_restore.clicked.connect(self.restore_selected)
+        self.btn_export.clicked.connect(self.export_excel)
+
+        self.count_label = QLabel("0 سجل")
+        self.count_label.setStyleSheet("font-size:13px;color:#475569;font-weight:600;"
+                                       "background:transparent;border:none;")
+
+        tb.addWidget(self.btn_add)
+        tb.addWidget(self.btn_archive)
+        tb.addWidget(self.btn_restore)
+        tb.addStretch()
+        tb.addWidget(self.count_label)
+        tb.addWidget(self.btn_export)
+        layout.addWidget(toolbar)
+
+        # --- تبويبان: نشط / مؤرشف ---
+        self.sub_tabs = QTabWidget()
+        self.sub_tabs.setStyleSheet("""
+            QTabWidget::pane { border:1px solid #dee2e6; border-radius:0 6px 6px 6px; background:white; }
+            QTabBar::tab { background:#e9ecef; color:#334155; padding:6px 16px;
+                           font-size:13px; border:1px solid #dee2e6; border-bottom:none;
+                           border-radius:4px 4px 0 0; margin-left:2px; }
+            QTabBar::tab:selected { background:white; color:#0d6efd; font-weight:bold; }
+            QTabBar::tab:hover:!selected { background:#dee2e6; }
+        """)
+
+        self.active_table   = self._make_table()
+        self.archived_table = self._make_table()
+
+        self.sub_tabs.addTab(self.active_table,   "✅  نشط")
+        self.sub_tabs.addTab(self.archived_table,  "🗄  مؤرشف")
+        layout.addWidget(self.sub_tabs)
+
+        # تلميح
+        hint = QLabel("💡  دبل كليك على ✓ لعرض السجل التاريخي  |  دبل كليك على عنوان العمود لتعديل الوصف"
+                      "  |  كليك يمين لقائمة الخيارات")
+        hint.setStyleSheet("color:#64748b; font-size:12px; background:transparent;")
+        hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(hint)
+
+    def _make_table(self) -> QTableWidget:
+        t = QTableWidget()
+        t.setLayoutDirection(Qt.RightToLeft)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QTableWidget.SelectItems)
+        t.setSelectionMode(QTableWidget.SingleSelection)
+        t.setEditTriggers(QTableWidget.NoEditTriggers)
+        t.verticalHeader().setVisible(False)
+        t.setContextMenuPolicy(Qt.CustomContextMenu)
+        t.setStyleSheet("""
+            QTableWidget { border:1px solid #e2e8f0; border-radius:8px;
+                           background:white; font-size:13px; color:#1e293b;
+                           gridline-color:#e2e8f0; }
+            QTableWidget::item { padding:4px; color:#1e293b; }
+            QTableWidget::item:selected { background:#dbeafe; color:#1e40af; }
+            QHeaderView::section { background:#1e293b; color:white; padding:7px 5px;
+                                   font-size:12px; font-weight:bold; border:none;
+                                   border-right:1px solid #334155; }
+            QTableWidget::item:alternate { background:#f8fafc; }
+        """)
+        t.cellDoubleClicked.connect(self._on_double_click)
+        t.customContextMenuRequested.connect(self._on_right_click)
+        t.horizontalHeader().sectionDoubleClicked.connect(self._on_header_double_click)
+        return t
+
+    def _current_table(self) -> QTableWidget:
+        return self.active_table if self.sub_tabs.currentIndex() == 0 else self.archived_table
+
+    # ------------------------------------------------------------------
+    # Refresh / بناء الجدول
+    # ------------------------------------------------------------------
+    def refresh(self):
+        self._build_table(self.active_table, archived=False)
+        self._build_table(self.archived_table, archived=True)
+        total = len(wir_tracker_db.get_active_entries(self.code))
+        self.count_label.setText(f"{total} سجل")
+
+    def _build_table(self, table: QTableWidget, archived: bool):
+        if archived:
+            entries = wir_tracker_db.get_archived_entries(self.code)
+        else:
+            entries = wir_tracker_db.get_active_entries(self.code)
+
+        # --- بناء lookup: (plot, desc) -> entry ---
+        # نجمع الـ descs والـ plots من الـ entries الحالية فقط
+        descs_seen, descs = set(), []
+        plots_seen, plots = set(), []
+        for e in entries:
+            if e['desc'] not in descs_seen:
+                descs_seen.add(e['desc'])
+                descs.append(e['desc'])
+            if e['plot'] not in plots_seen:
+                plots_seen.add(e['plot'])
+                plots.append(e['plot'])
+        try:
+            plots.sort(key=lambda x: int(x))
+        except Exception:
+            plots.sort()
+
+        lookup = {(e['plot'], e['desc']): e for e in entries}
+
+        table.blockSignals(True)
+        table.clear()
+        table.setRowCount(len(plots))
+        table.setColumnCount(len(descs) + 1)
+
+        # رؤوس الأعمدة
+        headers = ['رقم القطعة'] + [f'[{i+1}] {d}' for i, d in enumerate(descs)]
+        table.setHorizontalHeaderLabels(headers)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for c in range(1, len(descs) + 1):
+            table.horizontalHeader().setSectionResizeMode(c, QHeaderView.Interactive)
+            table.setColumnWidth(c, 160)
+
+        # بناء خلايا الجدول
+        for r, plot in enumerate(plots):
+            # عمود القطعة
+            p_item = QTableWidgetItem(plot)
+            p_item.setTextAlignment(Qt.AlignCenter)
+            p_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            p_item.setBackground(QColor('#f1f5f9'))
+            f = p_item.font(); f.setBold(True); p_item.setFont(f)
+            table.setItem(r, 0, p_item)
+
+            for c, desc in enumerate(descs):
+                entry = lookup.get((plot, desc))
+                if entry:
+                    # حساب عدد الـ Revisions النشطة
+                    active_revs = [h for h in entry.get('history', [])
+                                   if not h.get('archived', False)]
+                    count = len(active_revs)
+                    text  = '✓' if count == 1 else f'✓ ({count})' if count > 1 else ''
+
+                    cell = QTableWidgetItem(text)
+                    cell.setTextAlignment(Qt.AlignCenter)
+                    cell.setData(Qt.UserRole, entry)
+                    cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+                    if count == 0:
+                        cell.setForeground(TRACKER_COLOR_ARCHIVED)
+                    else:
+                        # اللون حسب آخر revision نشط
+                        last = active_revs[-1]
+                        if last.get('source') == 'auto':
+                            cell.setForeground(TRACKER_COLOR_AUTO)
+                        else:
+                            cell.setForeground(TRACKER_COLOR_MANUAL)
+
+                    fnt = cell.font(); fnt.setBold(True); fnt.setPointSize(13); cell.setFont(fnt)
+                    tip = '\n'.join(
+                        f"Rev{h.get('rev',i)}: {h.get('ref','')} | {h.get('date','')}"
+                        for i, h in enumerate(active_revs)
+                    )
+                    cell.setToolTip(tip)
+                    table.setItem(r, c + 1, cell)
+                else:
+                    blank = QTableWidgetItem('')
+                    blank.setFlags(Qt.ItemIsEnabled)
+                    blank.setBackground(QColor('#fafafa'))
+                    table.setItem(r, c + 1, blank)
+
+        table.resizeRowsToContents()
+        table.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+    def _on_double_click(self, row, col):
+        if col == 0:
+            return
+        table = self._current_table()
+        item = table.item(row, col)
+        if not item:
+            return
+        entry = item.data(Qt.UserRole)
+        if not entry:
+            return
+        dlg = HistoryDialog(self.code, entry, self)
+        dlg.exec_()
+        self.refresh()
+
+    def _on_header_double_click(self, col):
+        """دبل كليك على رأس العمود = تعديل الوصف"""
+        if col == 0:
+            return
+        table = self._current_table()
+        header_text = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ''
+        # استخراج الوصف من العنوان (الشكل: "[1] وصف النشاط")
+        old_desc = re.sub(r'^\[\d+\]\s*', '', header_text)
+        new_desc, ok = QInputDialog.getText(
+            self, "تعديل وصف الطلب",
+            "الوصف الجديد:",
+            text=old_desc
+        )
+        if ok and new_desc.strip() and new_desc.strip() != old_desc:
+            wir_tracker_db.update_desc(self.code, old_desc, new_desc.strip())
+            self.refresh()
+
+    def _on_right_click(self, pos):
+        table = self._current_table()
+        item = table.itemAt(pos)
+        entry = item.data(Qt.UserRole) if item else None
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background:white; border:1px solid #e2e8f0; border-radius:6px; font-size:13px; }
+            QMenu::item { padding:6px 20px; color:#1e293b; }
+            QMenu::item:selected { background:#eff6ff; color:#1d4ed8; }
+            QMenu::separator { height:1px; background:#f1f5f9; margin:3px 10px; }
+        """)
+
+        if entry:
+            act_hist    = menu.addAction("📋  عرض السجل التاريخي")
+            act_add_rev = menu.addAction("＋  إضافة Revision جديد")
+            menu.addSeparator()
+            act_edit_desc = menu.addAction("✏️  تعديل الوصف")
+            menu.addSeparator()
+            act_archive = menu.addAction("🗄  أرشفة")
+
+            chosen = menu.exec_(table.viewport().mapToGlobal(pos))
+            if chosen == act_hist:
+                dlg = HistoryDialog(self.code, entry, self)
+                dlg.exec_()
+                self.refresh()
+            elif chosen == act_add_rev:
+                dlg = RevisionEditDialog(self, title="إضافة Revision جديد")
+                if dlg.exec_() == QDialog.Accepted:
+                    d = dlg.get_data()
+                    wir_tracker_db.add_revision(
+                        self.code, entry['id'],
+                        d['ref'], d['date'], d['pdf_path'], source='manual'
+                    )
+                    self.refresh()
+            elif chosen == act_edit_desc:
+                col = table.currentColumn()
+                if col > 0:
+                    self._on_header_double_click(col)
+            elif chosen == act_archive:
+                reply = QMessageBox.question(
+                    self, "تأكيد الأرشفة",
+                    f"أرشفة القطعة {entry['plot']} - {entry['desc']}؟",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    wir_tracker_db.archive_entry(self.code, entry['id'])
+                    self.refresh()
+        else:
+            act_add = menu.addAction("＋  إضافة WIR جديد")
+            chosen = menu.exec_(table.viewport().mapToGlobal(pos))
+            if chosen == act_add:
+                self.add_manual()
+
+    # ------------------------------------------------------------------
+    # أزرار
+    # ------------------------------------------------------------------
+    def add_manual(self):
+        dlg = AddWirDialog(self.code, self.name, self)
+        if dlg.exec_() == QDialog.Accepted:
+            d = dlg.get_data()
+            wir_tracker_db.add_entry(
+                d['code'], d['plot'], d['desc'],
+                d['ref'], d['date'], d.get('pdf_path', ''), source='manual'
+            )
+            self.refresh()
+
+    def archive_selected(self):
+        table = self._current_table()
+        item = table.currentItem()
+        entry = item.data(Qt.UserRole) if item else None
+        if not entry:
+            QMessageBox.information(self, "تنبيه", "اختر خلية ✓ أولاً")
+            return
+        reply = QMessageBox.question(
+            self, "تأكيد",
+            f"أرشفة: القطعة {entry['plot']} - {entry['desc']}؟",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            wir_tracker_db.archive_entry(self.code, entry['id'])
+            self.refresh()
+
+    def restore_selected(self):
+        table = self._current_table()
+        item = table.currentItem()
+        entry = item.data(Qt.UserRole) if item else None
+        if not entry:
+            QMessageBox.information(self, "تنبيه", "اختر خلية مؤرشفة أولاً")
+            return
+        wir_tracker_db.restore_entry(self.code, entry['id'])
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # تصدير Excel
+    # ------------------------------------------------------------------
+    def export_excel(self):
+        try:
+            import openpyxl
+            from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        except ImportError:
+            QMessageBox.warning(self, "خطأ", "pip install openpyxl")
+            return
+
+        entries = wir_tracker_db.get_active_entries(self.code)
+        descs_seen, descs = set(), []
+        plots_seen, plots = set(), []
+        for e in entries:
+            if e['desc'] not in descs_seen:
+                descs_seen.add(e['desc']); descs.append(e['desc'])
+            if e['plot'] not in plots_seen:
+                plots_seen.add(e['plot']); plots.append(e['plot'])
+        try:
+            plots.sort(key=lambda x: int(x))
+        except Exception:
+            plots.sort()
+
+        if not plots:
+            QMessageBox.information(self, "تنبيه", "لا توجد بيانات"); return
+
+        lookup = {(e['plot'], e['desc']): e for e in entries}
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = self.name
+        ws.sheet_view.rightToLeft = True
+
+        hdr_fill = PatternFill("solid", fgColor="1e293b")
+        hdr_font = Font(color="FFFFFF", bold=True, size=11)
+        plt_fill = PatternFill("solid", fgColor="f1f5f9")
+        plt_font = Font(bold=True, size=11)
+        chk_font = Font(color="16a34a", bold=True, size=14)
+        center   = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        thin     = Side(style='thin', color='e2e8f0')
+        border   = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        # رؤوس
+        ws.cell(1, 1, "رقم القطعة").font = hdr_font
+        ws.cell(1, 1).fill = hdr_fill
+        ws.cell(1, 1).alignment = center
+        ws.cell(1, 1).border = border
+        ws.column_dimensions['A'].width = 14
+
+        for ci, desc in enumerate(descs, 2):
+            c = ws.cell(1, ci, f"[{ci-1}] {desc}")
+            c.font = hdr_font; c.fill = hdr_fill
+            c.alignment = center; c.border = border
+            ws.column_dimensions[ws.cell(1, ci).column_letter].width = 24
+
+        # بيانات
+        for ri, plot in enumerate(plots, 2):
+            pc = ws.cell(ri, 1, plot)
+            pc.font = plt_font; pc.fill = plt_fill
+            pc.alignment = center; pc.border = border
+            ws.row_dimensions[ri].height = 20
+            for ci, desc in enumerate(descs, 2):
+                entry = lookup.get((plot, desc))
+                if entry:
+                    active = [h for h in entry.get('history', []) if not h.get('archived')]
+                    cnt = len(active)
+                    txt = '✓' if cnt == 1 else f'✓ ({cnt})' if cnt > 1 else ''
+                    dc = ws.cell(ri, ci, txt)
+                    dc.font = chk_font
+                else:
+                    dc = ws.cell(ri, ci, '')
+                dc.alignment = center; dc.border = border
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'حفظ Excel', f'WIR_Matrix_{self.code}.xlsx', 'Excel (*.xlsx)'
+        )
+        if path:
+            wb.save(path)
+            QMessageBox.information(self, "نجاح", f"تم التصدير:\n{path}")
+
+
+# ------------------------------------------------------------------
+# Widget رئيسي للـ Tracker (يحتوي 4 تبويبات)
+# ------------------------------------------------------------------
+class WirTrackerWidget(QWidget):
+    """الواجهة الرئيسية لـ WIR Matrix Tracker"""
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.inner_tabs = QTabWidget()
+        self.inner_tabs.setStyleSheet("""
+            QTabWidget::pane { border:1px solid #dee2e6; border-radius:0 8px 8px 8px; background:white; }
+            QTabBar::tab { background:#e9ecef; color:#334155; padding:9px 20px;
+                           font-size:14px; font-weight:600; border:1px solid #dee2e6;
+                           border-bottom:none; border-radius:6px 6px 0 0; margin-left:2px; }
+            QTabBar::tab:selected { background:white; color:#0d6efd; font-weight:bold;
+                                    border-bottom:2px solid white; }
+            QTabBar::tab:hover:!selected { background:#dee2e6; }
+        """)
+
+        self.tracker_tabs = []
+        for code, name in DISC_LIST:
+            tab = WirTrackerTab(code, name)
+            self.inner_tabs.addTab(tab, name)
+            self.tracker_tabs.append(tab)
+
+        layout.addWidget(self.inner_tabs)
+
+    def refresh_all(self):
+        for tab in self.tracker_tabs:
+            tab.refresh()
+
+
 # -------------------- النافذة الرئيسية --------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("WIR Toilets Project by Yasser Hamouda v3.4")  # تم تغيير الإصدار
+        self.setWindowTitle("WIR Toilets Project by Yasser Hamouda v3.9")  # تحديث الإصدار
         self.setWindowIcon(QIcon(resource_path("icon.ico")))  # تعيين أيقونة البرنامج
         self.setGeometry(100, 100, 1400, 900)  # تم تعديل الارتفاع إلى 900
         self.setLayoutDirection(Qt.RightToLeft)
@@ -2203,7 +3447,11 @@ class MainWindow(QMainWindow):
 
         def validate_main_plots_input(text):
             cursor_pos = self.plots_input.cursorPosition()
-            filtered_text = ''.join(c for c in text if c.isdigit() or c in ' -.,*،')
+            # استبدال فواصل الأسطر والتابات بمسافة (لدعم لصق من Excel)
+            text2 = re.sub(r'[\r\n\t]', ' ', text)
+            filtered_text = ''.join(c for c in text2 if c.isdigit() or c in ' -.,*،')
+            # تقليص مسافات متعددة لمسافة واحدة
+            filtered_text = re.sub(r' {2,}', ' ', filtered_text)
             if filtered_text != text:
                 self.plots_input.setText(filtered_text)
                 self.plots_input.setCursorPosition(min(cursor_pos, len(filtered_text)))
@@ -2490,6 +3738,11 @@ class MainWindow(QMainWindow):
             tab = DisciplineTab(code, name, self)
             self.tabs.addTab(tab, name)
             self.disc_widgets.append(tab)
+
+        # تبويب متابعة WIR
+        self.wir_tracker_widget = WirTrackerWidget()
+        self.tabs.addTab(self.wir_tracker_widget, "📋  متابعة WIR")
+
         main_layout.addWidget(self.tabs, 1)  # stretch=1 يخليها تملأ المساحة
 
         self.btn_run = QPushButton("▶️ بدء توليد كافة الملفات")
@@ -2601,8 +3854,9 @@ class MainWindow(QMainWindow):
 
         # التوجيه: الآيقونة أقصى اليسار، النص لليمين
         counter_layout.addWidget(counter_icon)
-        counter_layout.addStretch()
         counter_layout.addWidget(self.file_counter_label)
+        counter_layout.addStretch()
+        
         body_layout.addWidget(counter_card)
 
         # --- معلومات الحالة فوق الـ progress bar ---
@@ -2622,9 +3876,9 @@ class MainWindow(QMainWindow):
         """)
         self.pct_label.setAlignment(Qt.AlignLeft)
 
-        status_layout.addWidget(self.pct_label)
-        status_layout.addStretch()
         status_layout.addWidget(self.progress_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.pct_label)
         body_layout.addLayout(status_layout)
 
         # --- Progress Bar ---
@@ -2895,6 +4149,7 @@ class MainWindow(QMainWindow):
                     rows_data.append({
                         'desc': desc,
                         'attach_paths': list(row['attach_paths']),
+                        'attach_pages': dict(row['attach_pages']),  # تمرير معلومات الصفحات
                         'revision': rev,
                         'manual_mode': True,
                         'manual_ref': full_ref,
@@ -2912,6 +4167,7 @@ class MainWindow(QMainWindow):
                         rows_data.append({
                             'desc': desc,
                             'attach_paths': list(row['attach_paths']),
+                            'attach_pages': dict(row['attach_pages']),
                             'revision': 0,
                             'manual_mode': False,
                             'plots': None,
@@ -2927,6 +4183,7 @@ class MainWindow(QMainWindow):
                         rows_data.append({
                             'desc': desc,
                             'attach_paths': list(row['attach_paths']),
+                            'attach_pages': dict(row['attach_pages']),
                             'revision': 0,
                             'manual_mode': False,
                             'plots': pl,
@@ -3060,8 +4317,10 @@ class MainWindow(QMainWindow):
             self.time_remaining_label.setText("0 ث")
             self.btn_open_output.setEnabled(True)
             QMessageBox.information(self, "نجاح", message)
-            # تحديث جميع قوائم الاقتراحات
+            # تحديث جميع قوائم الاقتراحات والـ tracker
             self.refresh_all_suggestions()
+            if hasattr(self, 'wir_tracker_widget'):
+                self.wir_tracker_widget.refresh_all()
         else:
             QMessageBox.critical(self, "خطأ", message)
             self.progress_label.setText("تم الإيقاف!" if "إيقاف" in message else "فشل!")
@@ -3116,7 +4375,7 @@ class MainWindow(QMainWindow):
                         'manual_ref_input': row['manual_ref_input'].text(),
                         'manual_plot_input': row['manual_plot_input'].text(),
                         'attach_paths': list(row['attach_paths']),
-                        # حفظ حالة التوسيع/الطي
+                        'attach_pages': dict(row['attach_pages']),  # حفظ الصفحات
                         'expanded': row['expand_btn'].isChecked(),
                     }
                     rows_data.append(row_state)
@@ -3207,9 +4466,10 @@ class MainWindow(QMainWindow):
                                'manual_plot_input', 'plots_input', 'radio_all', 'expand_btn'):
                         row[wk].blockSignals(False)
 
-                    # استعادة المرفقات مباشرة بدون بناء widgets معقدة
+                    # استعادة المرفقات
                     from PyQt5.QtCore import QSize as _QS
                     aw = row['attach_list_widget']
+                    saved_pages = row_state.get('attach_pages', {})
                     for att_path in row_state.get('attach_paths', []):
                         if os.path.exists(att_path) and att_path not in row['attach_paths']:
                             # إخفاء placeholder
@@ -3220,20 +4480,18 @@ class MainWindow(QMainWindow):
                                     break
                             item = QListWidgetItem()
                             item.setData(Qt.UserRole, att_path)
+                            item.setData(Qt.UserRole + 3, saved_pages.get(att_path, ""))
                             item.setToolTip(att_path)
                             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
                             item.setSizeHint(_QS(0, 32))
                             aw.addItem(item)
-                            iw = QWidget()
-                            iw.setStyleSheet("background: transparent; border: none;")
-                            il = QHBoxLayout(iw)
-                            il.setContentsMargins(6, 2, 6, 2)
-                            lbl = QLabel(f"📄  {os.path.basename(att_path)}")
-                            lbl.setStyleSheet("font-size: 12px; color: #1e293b; background: transparent;")
-                            lbl.setToolTip(att_path)
-                            il.addWidget(lbl, 1)
-                            aw.setItemWidget(item, iw)
                             row['attach_paths'].append(att_path)
+                            if saved_pages.get(att_path):
+                                row['attach_pages'][att_path] = saved_pages[att_path]
+
+                    # إعادة بناء الـ widgets للمرفقات
+                    if '_rebuild_widgets' in row:
+                        row['_rebuild_widgets']()
 
                     # استعادة حالة التوسيع/الطي
                     expanded = row_state.get('expanded', True)
