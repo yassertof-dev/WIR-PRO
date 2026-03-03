@@ -7,6 +7,7 @@ import tempfile
 import threading
 import traceback
 import unicodedata
+import uuid
 import pythoncom
 import json
 from docxtpl import DocxTemplate
@@ -19,7 +20,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QGroupBox, QFormLayout,
                              QTextEdit, QProgressBar, QListWidget, QListWidgetItem,
                              QFrame, QMenu, QSizePolicy, QStyleFactory,
-                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter, QInputDialog)
+                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter, QInputDialog,
+                             QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QComboBox, QToolButton)
 from PyQt5.QtCore import (Qt, QDate, QThread, pyqtSignal, QLocale, QPoint, QMimeData, QObject, QStringListModel)
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QDragEnterEvent, QDropEvent, QWheelEvent, QIcon
 
@@ -207,10 +209,550 @@ class SuggestionsDB:
 # Instance عامة
 suggestions_db = SuggestionsDB()
 
+
+# -------------------- WIR Tracker Database Class --------------------
+class WirTrackerDB:
+    """قاعدة بيانات WIR Matrix Tracker"""
+    
+    def __init__(self, db_path="wir_tracker.json"):
+        self.db_path = db_path
+        self.data = self._load()
+        
+    def _load(self) -> dict:
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return self._init_structure()
+        
+    def _init_structure(self) -> dict:
+        return {"AR": [], "CV": [], "MECH": [], "ELEC": []}
+        
+    def save(self):
+        """حفظ قاعدة البيانات"""
+        try:
+            with open(self.db_path, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_error(f"Failed to save WIR tracker DB: {e}")
+            
+    def get_entries(self, discipline: str, archived: bool = False) -> list:
+        """جلب الإدخالات حسب التخصص والأرشفة"""
+        if discipline not in self.data:
+            return []
+        return [entry for entry in self.data[discipline] 
+                if entry.get('archived', False) == archived]
+                
+    def get_entry_by_plot_desc(self, discipline: str, plot: str, desc: str) -> dict:
+        """الحصول على إدخال حسب التخصص والقطعة والوصف"""
+        for entry in self.get_entries(discipline):
+            if entry.get('plot') == plot and entry.get('desc') == desc:
+                return entry
+        return None
+        
+    def add_or_update_entry(self, discipline: str, plot: str, desc: str, 
+                           rev: str = "", ref: str = "", date: str = "", 
+                           pdf_path: str = "", source: str = "manual"):
+        """إضافة أو تحديث إدخال"""
+        entry = self.get_entry_by_plot_desc(discipline, plot, desc)
+        
+        if not entry:
+            entry = {
+                'id': str(uuid.uuid4()),
+                'plot': plot,
+                'desc': desc,
+                'discipline': discipline,
+                'history': [],
+                'archived': False
+            }
+            self.data[discipline].append(entry)
+            
+        revision = {
+            'rev': rev,
+            'ref': ref,
+            'date': date,
+            'pdf_path': pdf_path,
+            'source': source,
+            'archived': False
+        }
+        
+        entry['history'].append(revision)
+        self.save()
+        
+    def archive_revision(self, discipline: str, entry_id: str, rev_index: int):
+        """أرشفة مراجعة"""
+        for entry in self.data[discipline]:
+            if entry.get('id') == entry_id and 0 <= rev_index < len(entry['history']):
+                entry['history'][rev_index]['archived'] = True
+                break
+        self.save()
+        
+    def restore_revision(self, discipline: str, entry_id: str, rev_index: int):
+        """استعادة مراجعة من الأرشيف"""
+        for entry in self.data[discipline]:
+            if entry.get('id') == entry_id and 0 <= rev_index < len(entry['history']):
+                entry['history'][rev_index]['archived'] = False
+                break
+        self.save()
+        
+    def archive_entry(self, discipline: str, entry_id: str):
+        """أرشفة إدخال كامل"""
+        for entry in self.data[discipline]:
+            if entry.get('id') == entry_id:
+                entry['archived'] = True
+                break
+        self.save()
+        
+    def restore_entry(self, discipline: str, entry_id: str):
+        """استعادة إدخال من الأرشيف"""
+        for entry in self.data[discipline]:
+            if entry.get('id') == entry_id:
+                entry['archived'] = False
+                break
+        self.save()
+        
+    def update_description(self, discipline: str, entry_id: str, new_desc: str):
+        """تحديث وصف الإدخال"""
+        for entry in self.data[discipline]:
+            if entry.get('id') == entry_id:
+                entry['desc'] = new_desc
+                break
+        self.save()
+
+
+# Instance عامة لـ WIR Tracker
+wir_tracker_db = WirTrackerDB()
+
+# -------------------- History Dialog Class --------------------
+class HistoryDialog(QDialog):
+    """نافذة عرض السجل التاريخي للـ WIR"""
+    
+    def __init__(self, entry_data, parent=None):
+        super().__init__(parent)
+        self.entry_data = entry_data
+        self.setWindowTitle("سجل المراجعات")
+        self.setGeometry(200, 200, 800, 500)
+        
+        layout = QVBoxLayout()
+        
+        # جدول المراجعات
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(5)
+        self.history_table.setHorizontalHeaderLabels(['المراجعة', 'المرجع', 'التاريخ', 'فتح PDF', 'أرشيف'])
+        header = self.history_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        
+        # أزرار التحكم
+        button_layout = QHBoxLayout()
+        self.edit_desc_btn = QPushButton("تعديل الوصف")
+        self.add_rev_btn = QPushButton("إضافة مراجعة")
+        self.archive_btn = QPushButton("أرشفة")
+        self.close_btn = QPushButton("إغلاق")
+        
+        button_layout.addWidget(self.edit_desc_btn)
+        button_layout.addWidget(self.add_rev_btn)
+        button_layout.addWidget(self.archive_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(self.close_btn)
+        
+        layout.addWidget(self.history_table)
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+        
+        # توصيل الأحداث
+        self.edit_desc_btn.clicked.connect(self.edit_description)
+        self.add_rev_btn.clicked.connect(self.add_revision)
+        self.archive_btn.clicked.connect(self.archive_revision)
+        self.close_btn.clicked.connect(self.close)
+        
+        self.populate_table()
+        
+    def populate_table(self):
+        """تعبئة الجدول بالمراجعات"""
+        revisions = [rev for rev in self.entry_data.get('history', []) if not rev.get('archived', False)]
+        self.history_table.setRowCount(len(revisions))
+        
+        for i, rev in enumerate(revisions):
+            self.history_table.setItem(i, 0, QTableWidgetItem(rev.get('rev', '')))
+            self.history_table.setItem(i, 1, QTableWidgetItem(rev.get('ref', '')))
+            self.history_table.setItem(i, 2, QTableWidgetItem(rev.get('date', '')))
+            
+            # زر فتح PDF
+            pdf_path = rev.get('pdf_path', '')
+            if pdf_path and os.path.exists(pdf_path):
+                open_btn = QPushButton("فتح")
+                open_btn.clicked.connect(lambda _, p=pdf_path: self.open_pdf(p))
+                self.history_table.setCellWidget(i, 3, open_btn)
+            else:
+                self.history_table.setItem(i, 3, QTableWidgetItem("غير متوفر"))
+            
+            # مربع الأرشفة
+            archive_cb = QCheckBox()
+            archive_cb.setChecked(False)
+            self.history_table.setCellWidget(i, 4, archive_cb)
+    
+    def open_pdf(self, pdf_path):
+        """فتح ملف PDF"""
+        import subprocess
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(pdf_path)
+            elif sys.platform.startswith('darwin'):
+                subprocess.call(['open', pdf_path])
+            else:
+                subprocess.call(['xdg-open', pdf_path])
+        except Exception as e:
+            QMessageBox.warning(self, "خطأ", f"لا يمكن فتح الملف: {e}")
+    
+    def edit_description(self):
+        """تعديل الوصف"""
+        current_desc = self.entry_data.get('desc', '')
+        new_desc, ok = QInputDialog.getText(self, "تعديل الوصف", "الوصف الجديد:", text=current_desc)
+        if ok and new_desc != current_desc:
+            # تحديث الوصف في قاعدة البيانات
+            wir_tracker_db.update_description(
+                self.entry_data['discipline'], 
+                self.entry_data['id'], 
+                new_desc
+            )
+            self.entry_data['desc'] = new_desc
+            QMessageBox.information(self, "نجاح", "تم تحديث الوصف بنجاح")
+    
+    def add_revision(self):
+        """إضافة مراجعة جديدة"""
+        # هذه الدالة ستكون مسؤولة عن فتح نافذة لإضافة مراجعة جديدة
+        # لاحقًا سيتم ربطها بالدالة المناسبة في النافذة الرئيسية
+        QMessageBox.information(self, "معلق", "وظيفة إضافة المراجعة ستكون متاحة بعد ربطها بالنافذة الرئيسية")
+    
+    def archive_revision(self):
+        """أرشفة المراجعة المحددة"""
+        selected_row = self.history_table.currentRow()
+        if selected_row >= 0:
+            revisions = [rev for rev in self.entry_data.get('history', []) if not rev.get('archived', False)]
+            if selected_row < len(revisions):
+                # نحتاج للحصول على الفهرس الأصلي للمراجعة قبل الأرشفة
+                original_index = self.entry_data['history'].index(revisions[selected_row])
+                reply = QMessageBox.question(self, "تأكيد", "هل أنت متأكد من أرشفة هذه المراجعة؟")
+                if reply == QMessageBox.Yes:
+                    wir_tracker_db.archive_revision(
+                        self.entry_data['discipline'],
+                        self.entry_data['id'],
+                        original_index
+                    )
+                    self.populate_table()
+                    QMessageBox.information(self, "نجاح", "تم أرشفة المراجعة")
+
+
+# -------------------- WIR Tracker Window Class --------------------
+class WIRTrackerWindow(QMainWindow):
+    """نافذة WIR Matrix Tracker"""
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("WIR Matrix Tracker")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+        
+        # تبويبات التخصصات
+        self.tabs = QTabWidget()
+        self.disciplines = ['AR', 'CV', 'MECH', 'ELEC', 'Archived']
+        
+        for disc in self.disciplines:
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            
+            # جدول WIR
+            table = QTableWidget()
+            table.setColumnCount(1)  # سيتم تحديث عدد الأعمدة لاحقًا
+            table.setHorizontalHeaderLabels(['رقم القطعة'])
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            
+            # تعيين عدد الصفوف الافتراضي
+            table.setRowCount(10)
+            
+            # توصيل حدث النقر الأيمن
+            table.setContextMenuPolicy(Qt.CustomContextMenu)
+            table.customContextMenuRequested.connect(lambda pos, t=table, d=disc: self.show_context_menu(pos, t, d))
+            
+            # توصيل حدث النقر المزدوج
+            table.cellDoubleClicked.connect(lambda r, c, t=table, d=disc: self.cell_double_clicked(r, c, t, d))
+            
+            tab_layout.addWidget(table)
+            self.tabs.addTab(tab, disc)
+            
+        layout.addWidget(self.tabs)
+        
+        # زر التحديث
+        refresh_btn = QPushButton("تحديث")
+        refresh_btn.clicked.connect(self.refresh_all_tables)
+        layout.addWidget(refresh_btn)
+        
+        self.plot_tables = {}
+        for i, disc in enumerate(self.disciplines):
+            self.plot_tables[disc] = self.tabs.widget(i).findChild(QTableWidget)
+        
+        self.refresh_all_tables()
+    
+    def refresh_all_tables(self):
+        """تحديث جميع الجداول"""
+        for disc in ['AR', 'CV', 'MECH', 'ELEC']:
+            self.populate_table(disc)
+        
+        # تحديث تبويب الأرشيف
+        archived_tab_idx = self.disciplines.index('Archived')
+        self.populate_archived_table(archived_tab_idx)
+    
+    def populate_table(self, discipline):
+        """تعبئة جدول حسب التخصص"""
+        table = self.plot_tables[discipline]
+        if not table:
+            return
+            
+        # جلب البيانات من قاعدة البيانات
+        entries = wir_tracker_db.get_entries(discipline, archived=False)
+        
+        # جلب جميع الأرقام الفريدة للقطع والأوصاف
+        plots = sorted(list(set([entry['plot'] for entry in entries])), key=lambda x: to_english_digits(x))
+        descs = sorted(list(set([entry['desc'] for entry in entries])), key=lambda x: x)
+        
+        # تعيين عدد الأعمدة (الوصف) + عمود واحد للأرقام
+        table.setColumnCount(1 + len(descs))
+        table.setHorizontalHeaderLabels(['رقم القطعة'] + descs)
+        
+        # تعيين عدد الصفوف (الأرقام)
+        table.setRowCount(len(plots))
+        
+        # ملء رؤوس الصفوف
+        for i, plot in enumerate(plots):
+            item = QTableWidgetItem(plot)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # جعله غير قابل للتعديل
+            table.setVerticalHeaderItem(i, item)
+        
+        # ملء البيانات في الخلايا
+        for i, plot in enumerate(plots):
+            for j, desc in enumerate(descs):
+                # البحث عن الإدخالات المطابقة
+                matching_entries = [entry for entry in entries if entry['plot'] == plot and entry['desc'] == desc]
+                
+                if matching_entries:
+                    entry = matching_entries[0]
+                    history_count = len([h for h in entry.get('history', []) if not h.get('archived', False)])
+                    
+                    cell_item = QTableWidgetItem()
+                    if history_count == 0:
+                        cell_item.setText("")
+                    elif history_count == 1:
+                        cell_item.setText("✓")
+                    else:
+                        cell_item.setText(f"✓ ({history_count})")
+                    
+                    # تعيين لون الخلفية حسب مصدر المراجعة
+                    first_history = next((h for h in entry.get('history', []) if not h.get('archived', False)), None)
+                    if first_history:
+                        source = first_history.get('source', 'manual')
+                        if source == 'auto':
+                            cell_item.setBackground(QColor(144, 238, 144))  # لون أخضر فاتح
+                        else:
+                            cell_item.setBackground(QColor(173, 216, 230))  # لون أزرق فاتح
+                    
+                    cell_item.setData(Qt.UserRole, entry)  # تخزين البيانات في الخانة
+                    
+                    table.setItem(i, j+1, cell_item)
+                else:
+                    # خلية فارغة
+                    table.setItem(i, j+1, QTableWidgetItem(""))
+    
+    def populate_archived_table(self, tab_index):
+        """تعبئة جدول الأرشيف"""
+        archived_table = self.tabs.widget(tab_index).findChild(QTableWidget)
+        if not archived_table:
+            return
+            
+        # جلب جميع الإدخالات المؤرشفة
+        all_archived = []
+        for disc in ['AR', 'CV', 'MECH', 'ELEC']:
+            archived = wir_tracker_db.get_entries(disc, archived=True)
+            for entry in archived:
+                entry['discipline'] = disc  # إضافة التخصص إلى الإدخال
+            all_archived.extend(archived)
+        
+        if not all_archived:
+            archived_table.setRowCount(0)
+            archived_table.setColumnCount(3)
+            archived_table.setHorizontalHeaderLabels(['التخصص', 'رقم القطعة', 'الوصف'])
+            return
+        
+        # جلب الأوصاف الفريدة
+        descs = sorted(list(set([entry['desc'] for entry in all_archived])), key=lambda x: x)
+        
+        # تعيين عدد الأعمدة (الوصف) + عمودين للتخصص والقطع
+        archived_table.setColumnCount(2 + len(descs))
+        headers = ['رقم القطعة'] + ['تخصص'] + descs
+        archived_table.setHorizontalHeaderLabels(headers)
+        
+        # تعيين عدد الصفوف
+        plots = sorted(list(set([entry['plot'] for entry in all_archived])), key=lambda x: to_english_digits(x))
+        archived_table.setRowCount(len(plots))
+        
+        # ملء رؤوس الصفوف
+        for i, plot in enumerate(plots):
+            item = QTableWidgetItem(plot)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            archived_table.setVerticalHeaderItem(i, item)
+        
+        # ملء البيانات في الخلايا
+        for i, plot in enumerate(plots):
+            # البحث عن الإدخالات المطابقة
+            matching_entries = [entry for entry in all_archived if entry['plot'] == plot]
+            
+            for entry in matching_entries:
+                desc = entry['desc']
+                disc = entry['discipline']
+                
+                # العثور على فهرس الوصف في الأعمدة
+                desc_col = -1
+                for col_idx in range(2, archived_table.columnCount()):
+                    if archived_table.horizontalHeaderItem(col_idx).text() == desc:
+                        desc_col = col_idx
+                        break
+                
+                if desc_col != -1:
+                    # العثور على فهرس الصف المطابق
+                    plot_row = -1
+                    for row_idx in range(archived_table.rowCount()):
+                        if archived_table.verticalHeaderItem(row_idx).text() == plot:
+                            plot_row = row_idx
+                            break
+                    
+                    if plot_row != -1:
+                        history_count = len([h for h in entry.get('history', []) if not h.get('archived', False)])
+                        
+                        cell_item = QTableWidgetItem()
+                        if history_count == 0:
+                            cell_item.setText("")
+                        elif history_count == 1:
+                            cell_item.setText("✓")
+                        else:
+                            cell_item.setText(f"✓ ({history_count})")
+                        
+                        # تعيين لون الخلفية رمادي لأنها مؤرشفة
+                        cell_item.setBackground(QColor(211, 211, 211))
+                        
+                        cell_item.setData(Qt.UserRole, entry)
+                        
+                        archived_table.setItem(plot_row, desc_col, cell_item)
+    
+    def show_context_menu(self, position, table, discipline):
+        """عرض قائمة الزر الأيمن"""
+        menu = QMenu()
+        
+        # الحصول على الخانة المحددة
+        cell = table.itemAt(position)
+        if cell and cell.data(Qt.UserRole):
+            menu.addAction("عرض السجل التاريخي", lambda: self.view_history(cell))
+            menu.addAction("إضافة مراجعة جديدة", lambda: self.add_revision_to_cell(cell))
+            menu.addAction("تعديل الوصف", lambda: self.edit_description_from_cell(cell))
+            menu.addAction("أرشفة العنصر", lambda: self.archive_entry_from_cell(cell))
+        else:
+            menu.addAction("إضافة إدخال جديد", lambda: self.add_new_entry(table, discipline))
+        
+        menu.exec_(table.mapToGlobal(position))
+    
+    def cell_double_clicked(self, row, col, table, discipline):
+        """حدث النقر المزدوج على خلية"""
+        if col == 0:  # عمود رقم القطعة
+            return  # لا نفعل شيئًا لعمود العنوان
+        
+        cell = table.item(row, col)
+        if cell and cell.data(Qt.UserRole):
+            self.view_history(cell)
+        else:
+            # إذا كانت الخانة فارغة، نضيف إدخال جديد
+            plot = table.verticalHeaderItem(row).text() if table.rowCount() > row else ""
+            desc = table.horizontalHeaderItem(col).text() if table.columnCount() > col else ""
+            if plot and desc:
+                # نحتاج إلى فتح نافذة لإدخال بيانات المراجعة الجديدة
+                self.add_new_revision_for_plot_desc(discipline, plot, desc)
+    
+    def view_history(self, cell):
+        """عرض السجل التاريخي للخلية"""
+        entry_data = cell.data(Qt.UserRole)
+        if entry_data:
+            dialog = HistoryDialog(entry_data, self)
+            dialog.exec_()
+    
+    def add_revision_to_cell(self, cell):
+        """إضافة مراجعة جديدة إلى الخانة"""
+        entry_data = cell.data(Qt.UserRole)
+        if entry_data:
+            # فتح نافذة لإضافة مراجعة جديدة
+            self.add_new_revision_for_existing_entry(entry_data)
+    
+    def add_new_revision_for_existing_entry(self, entry_data):
+        """إضافة مراجعة جديدة لدخول موجود"""
+        # في الإصدار الحالي، نعرض رسالة بسيطة
+        # لاحقًا يمكن ربط هذه الدالة بنافذة الإدخال
+        QMessageBox.information(self, "معلق", f"إضافة مراجعة جديدة للقطعة {entry_data.get('plot')} والوصف {entry_data.get('desc')}")
+    
+    def add_new_revision_for_plot_desc(self, discipline, plot, desc):
+        """إضافة مراجعة جديدة لرقم قطعة ووصف محددين"""
+        # في الإصدار الحالي، نعرض رسالة بسيطة
+        # لاحقًا يمكن ربط هذه الدالة بنافذة الإدخال
+        QMessageBox.information(self, "معلق", f"إضافة مراجعة جديدة للقطعة {plot} والوصف {desc} في التخصص {discipline}")
+    
+    def edit_description_from_cell(self, cell):
+        """تعديل وصف من الخانة"""
+        entry_data = cell.data(Qt.UserRole)
+        if entry_data:
+            current_desc = entry_data.get('desc', '')
+            new_desc, ok = QInputDialog.getText(self, "تعديل الوصف", "الوصف الجديد:", text=current_desc)
+            if ok and new_desc != current_desc:
+                # تحديث الوصف في قاعدة البيانات
+                wir_tracker_db.update_description(
+                    entry_data['discipline'], 
+                    entry_data['id'], 
+                    new_desc
+                )
+                # تحديث النافذة
+                self.refresh_all_tables()
+                QMessageBox.information(self, "نجاح", "تم تحديث الوصف بنجاح")
+    
+    def archive_entry_from_cell(self, cell):
+        """أرشفة إدخال من الخانة"""
+        entry_data = cell.data(Qt.UserRole)
+        if entry_data:
+            reply = QMessageBox.question(self, "تأكيد", f"هل أنت متأكد من أرشفة الإدخال للقطعة {entry_data.get('plot')} والوصف {entry_data.get('desc')}؟")
+            if reply == QMessageBox.Yes:
+                wir_tracker_db.archive_entry(
+                    entry_data['discipline'],
+                    entry_data['id']
+                )
+                self.refresh_all_tables()
+                QMessageBox.information(self, "نجاح", "تم أرشفة الإدخال")
+    
+    def add_new_entry(self, table, discipline):
+        """إضافة إدخال جديد"""
+        # الحصول على رقم القطعة من المحدد حالياً
+        current_row = table.currentRow()
+        plot = table.verticalHeaderItem(current_row).text() if current_row >= 0 and table.verticalHeaderItem(current_row) else ""
+        
+        # طلب إدخال الوصف
+        desc, ok = QInputDialog.getText(self, "إدخال جديد", "وصف الإدخال:", text="")
+        if ok and desc.strip():
+            # إضافة إدخال فارغ إلى قاعدة البيانات
+            wir_tracker_db.add_or_update_entry(discipline, plot, desc)
+            self.refresh_all_tables()
+            QMessageBox.information(self, "نجاح", "تم إضافة الإدخال الجديد")
+
+
 # -------------------- Worker Thread --------------------
 class WorkerThread(QThread):
-    task_done  = pyqtSignal(int, str, str)
-    task_error = pyqtSignal(int, str)
 
     def __init__(self, tasks, data, stop_event):
         super().__init__()
@@ -498,6 +1040,32 @@ class ProcessThread(QThread):
             self.created_files.append(final_file)
             current = self._processed
             total = self._total
+
+            # استخراج معلومات الملف لإضافته إلى WIR Tracker
+            # استخراج معلومات من المهمة الحالية
+            if hasattr(self, 'tasks') and task_index < len(self.tasks[1]):
+                task = self.tasks[1][task_index][1]  # [index, task_data]
+                ref = task.get('ref', '')
+                desc = task.get('desc', '')
+                plot = task.get('plot', '')
+                rev = task.get('rev', '')
+                
+                # استخراج تخصص من ref (الـ 4 حروف الأولى)
+                discipline = ref[:4] if len(ref) >= 4 else ''
+                
+                # التحقق مما إذا كان الملف من نوع WIR
+                if 'WIR' in ref.upper():
+                    # إضافة الملف إلى WIR Tracker
+                    wir_tracker_db.add_or_update_entry(
+                        discipline=discipline,
+                        plot=plot,
+                        desc=desc,
+                        rev=str(rev),
+                        ref=ref,
+                        date=datetime.datetime.now().strftime("%Y-%m-%d"),
+                        pdf_path=final_file,
+                        source="auto"
+                    )
 
             elapsed = time.time() - self.start_time
             if current > 0:
@@ -2871,6 +3439,16 @@ class MainWindow(QMainWindow):
 
         main_h_layout.addWidget(progress_widget, 0)  # عرض ثابت بدون stretch
 
+        # -------------------- إضافة شريط القوائم --------------------
+        menubar = self.menuBar()
+        
+        # قائمة الأدوات
+        tools_menu = menubar.addMenu('أدوات')
+        
+        # خيار تتبع WIR
+        wir_tracker_action = tools_menu.addAction('WIR Matrix Tracker')
+        wir_tracker_action.triggered.connect(self.open_wir_tracker)
+        
         self.tabs.setCurrentIndex(0)
 
         # -------------------- استعادة الجلسة السابقة --------------------
@@ -3395,6 +3973,17 @@ class MainWindow(QMainWindow):
         self.save_session()
         event.accept()
 
+    def open_wir_tracker(self):
+        """فتح نافذة تتبع WIR"""
+        # التأكد من أن النافذة غير مفتوحة مسبقاً
+        if not hasattr(self, 'wir_tracker_window') or self.wir_tracker_window is None:
+            self.wir_tracker_window = WIRTrackerWindow()
+        
+        # عرض النافذة وجلبها إلى المقدمة
+        self.wir_tracker_window.show()
+        self.wir_tracker_window.raise_()
+        self.wir_tracker_window.activateWindow()
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 11))
@@ -3408,6 +3997,20 @@ if __name__ == "__main__":
             font-size: 13px;
         }
     """)
+    
+    # Create and show the main window
     window = MainWindow()
+    
+    # Add menu bar with WIR Tracker option
+    menubar = window.menuBar()
+    tools_menu = menubar.addMenu('أدوات')
+    
+    def show_wir_tracker():
+        tracker_window = WIRTrackerWindow()
+        tracker_window.show()
+    
+    tracker_action = tools_menu.addAction('WIR Matrix Tracker')
+    tracker_action.triggered.connect(show_wir_tracker)
+    
     window.show()
     sys.exit(app.exec_())
