@@ -68,7 +68,7 @@ def convert_docx_to_pdf(word_app, docx_path, pdf_path):
     docx_path = os.path.abspath(docx_path)
     pdf_path = os.path.abspath(pdf_path)
     doc = word_app.Documents.Open(docx_path, ReadOnly=True)
-    doc.ExportAsFixedFormat(1, pdf_path)  # 1 = PDF format
+    doc.ExportAsFixedFormat(2, pdf_path)  # 2 = PDF format
     doc.Close()
     return True
 
