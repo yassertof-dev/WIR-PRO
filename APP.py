@@ -3018,6 +3018,27 @@ class MainWindow(QMainWindow):
         hdr_title_layout.addWidget(hdr_icon)
         hdr_title_layout.addWidget(hdr_text)
         hdr_title_layout.addStretch()
+        
+        # زر فتح سجل الطلبات في نافذة منفصلة - في الشريط العلوي بجانب التبويبات
+        self.btn_wir_log = QPushButton("📋 سجل الطلبات")
+        self.btn_wir_log.setFixedHeight(32)
+        self.btn_wir_log.setCursor(Qt.PointingHandCursor)
+        self.btn_wir_log.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                border-radius: 6px;
+                border: none;
+                padding: 0 16px;
+            }
+            QPushButton:hover { background-color: #138496; }
+            QPushButton:pressed { background-color: #117a8b; }
+        """)
+        self.btn_wir_log.clicked.connect(self.open_wir_log_window)
+        hdr_title_layout.addWidget(self.btn_wir_log)
+        
         header_outer.addWidget(hdr_title_bar)
 
         # المحتوى
@@ -3336,25 +3357,6 @@ class MainWindow(QMainWindow):
             self.disc_widgets.append(tab)
         
         main_layout.addWidget(self.tabs, 1)  # stretch=1 يخليها تملأ المساحة
-
-        # زر فتح سجل الطلبات في نافذة منفصلة
-        self.btn_wir_log = QPushButton("📋 سجل الطلبات")
-        self.btn_wir_log.setFixedHeight(45)
-        self.btn_wir_log.setCursor(Qt.PointingHandCursor)
-        self.btn_wir_log.setStyleSheet("""
-            QPushButton {
-                background-color: #17a2b8;
-                color: white;
-                font-weight: bold;
-                font-size: 16px;
-                border-radius: 8px;
-                border: none;
-            }
-            QPushButton:hover { background-color: #138496; }
-            QPushButton:pressed { background-color: #117a8b; }
-        """)
-        self.btn_wir_log.clicked.connect(self.open_wir_log_window)
-        main_layout.addWidget(self.btn_wir_log)
 
         self.btn_run = QPushButton("▶️ بدء توليد كافة الملفات")
         self.btn_run.setFixedHeight(60)
