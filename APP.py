@@ -90,6 +90,99 @@ def log_error(error_message):
     except:
         pass
 
+# -------------------- WIR Database System --------------------
+class WIRDatabase:
+    """قاعدة بيانات لحفظ سجل طلبات الاستلام WIR"""
+    
+    DB_FILE = "wir_requests.json"
+    
+    def __init__(self, db_path=None):
+        self.db_path = db_path or self.DB_FILE
+        self.requests = self._load()
+    
+    def _load(self):
+        """تحميل البيانات من الملف"""
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return []
+    
+    def save(self):
+        """حفظ البيانات إلى الملف"""
+        try:
+            with open(self.db_path, 'w', encoding='utf-8') as f:
+                json.dump(self.requests, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_error(f"Failed to save WIR database: {e}")
+    
+    def add_request(self, ref, rev, plot, discipline, description, suffix, date, time, attachments=None):
+        """إضافة طلب جديد للسجل"""
+        request = {
+            'id': len(self.requests) + 1,
+            'ref': ref,
+            'rev': rev,
+            'plot': plot,
+            'discipline': discipline,
+            'description': description,
+            'suffix': suffix,
+            'date': date,
+            'time': time,
+            'attachments': attachments or [],
+            'created_at': datetime.datetime.now().isoformat()
+        }
+        self.requests.append(request)
+        self.save()
+        return request
+    
+    def get_all_requests(self):
+        """الحصول على جميع الطلبات"""
+        return self.requests
+    
+    def get_requests_by_discipline(self, discipline):
+        """الحصول على طلبات حسب التخصص"""
+        return [r for r in self.requests if r['discipline'] == discipline]
+    
+    def get_requests_by_date(self, date_str):
+        """الحصول على طلبات حسب التاريخ"""
+        return [r for r in self.requests if r['date'] == date_str]
+    
+    def delete_request(self, request_id):
+        """حذف طلب بالمعرف"""
+        self.requests = [r for r in self.requests if r['id'] != request_id]
+        self.save()
+    
+    def clear_all(self):
+        """مسح جميع السجلات"""
+        self.requests = []
+        self.save()
+    
+    def export_to_csv(self, output_path):
+        """تصدير السجلات إلى CSV"""
+        import csv
+        if not self.requests:
+            return False
+        try:
+            with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(['م', 'الرقم المرجعي', 'المراجعة', 'القطعة', 'التخصص', 
+                               'الوصف', 'اللاحقة', 'التاريخ', 'الوقت', 'عدد المرفقات'])
+                for r in self.requests:
+                    writer.writerow([
+                        r['id'], r['ref'], f"REV{r['rev']:02d}", r['plot'],
+                        r['discipline'], r['description'], r['suffix'],
+                        r['date'], r['time'], len(r.get('attachments', []))
+                    ])
+            return True
+        except Exception as e:
+            log_error(f"Failed to export WIR to CSV: {e}")
+            return False
+
+# Instance عامة لقاعدة البيانات
+wir_db = WIRDatabase()
+
 # -------------------- Smart Suggestions System --------------------
 class SuggestionsDB:
     """قاعدة بيانات الاقتراحات الذكية مع حفظ مؤجل لتحسين الأداء"""
@@ -358,6 +451,22 @@ class WorkerThread(QThread):
                     self._merge_pdfs(temp_pdf, attach_with_pages, final_pdf)
                     self._cleanup(temp_docx, temp_pdf)
 
+                    # إضافة الطلب إلى قاعدة بيانات WIR
+                    try:
+                        wir_db.add_request(
+                            ref=ref,
+                            rev=rev,
+                            plot=plot,
+                            discipline=task.get('discipline', ''),
+                            description=desc,
+                            suffix=suffix,
+                            date=self.data['date'],
+                            time=self.data['time'],
+                            attachments=attach_paths
+                        )
+                    except Exception as db_err:
+                        log_error(f"Failed to add WIR request to DB: {db_err}")
+
                     self.task_done.emit(task_index, f"تم: {os.path.basename(final_pdf)}", final_pdf)
 
                 except Exception as e:
@@ -439,7 +548,8 @@ class ProcessThread(QThread):
                             'ref': ref_clean, 'code': code, 'name': name,
                             'desc': desc, 'attach_paths': attach_paths,
                             'attach_pages': attach_pages,   # تمرير معلومات الصفحات
-                            'rev': rev, 'plot': p_num_clean, 'suffix': suffix_clean
+                            'rev': rev, 'plot': p_num_clean, 'suffix': suffix_clean,
+                            'discipline': code  # إضافة التخصص للطلب
                         })
                         if not manual_mode:
                             serial += 1
@@ -736,6 +846,219 @@ class AttachListWidget(QListWidget):
             color: #1e40af;
         }
         """)
+
+# -------------------- كلاس سجل طلبات WIR --------------------
+class WIRLogTab(QWidget):
+    """تبويب لعرض سجل طلبات الاستلام WIR المسجلة"""
+    
+    def __init__(self, main_window=None):
+        super().__init__()
+        self.main_window = main_window
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(8, 8, 8, 8)
+        self.main_layout.setSpacing(8)
+        
+        # شريط الأدوات العلوي
+        top_bar = QWidget()
+        top_bar.setStyleSheet("""
+            QWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 8px;
+            }
+        """)
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(10, 6, 10, 6)
+        
+        # زر تحديث القائمة
+        self.btn_refresh = QPushButton("🔄 تحديث")
+        self.btn_refresh.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 6px 14px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #138496; }
+            QPushButton:pressed { background-color: #117a8b; }
+        """)
+        self.btn_refresh.clicked.connect(self.load_requests)
+        
+        # زر تصدير CSV
+        self.btn_export = QPushButton("📄 تصدير CSV")
+        self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 6px 14px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:pressed { background-color: #1e7e34; }
+        """)
+        self.btn_export.clicked.connect(self.export_csv)
+        
+        # زر مسح السجل
+        self.btn_clear = QPushButton("🗑️ مسح السجل")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 6px 14px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #c82333; }
+            QPushButton:pressed { background-color: #bd2130; }
+        """)
+        self.btn_clear.clicked.connect(self.clear_log)
+        
+        top_layout.addWidget(self.btn_refresh)
+        top_layout.addWidget(self.btn_export)
+        top_layout.addStretch()
+        top_layout.addWidget(self.btn_clear)
+        self.main_layout.addWidget(top_bar)
+        
+        # جدول العرض
+        from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView, QHBoxLayout
+        self.table = QTableWidget()
+        self.table.setColumnCount(9)
+        self.table.setHorizontalHeaderLabels([
+            'م', 'الرقم المرجعي', 'المراجعة', 'القطعة', 'التخصص',
+            'الوصف', 'اللاحقة', 'التاريخ', 'الوقت'
+        ])
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: white;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                gridline-color: #e9ecef;
+                font-size: 13px;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                background-color: #0d6efd;
+                color: white;
+            }
+            QHeaderView::section {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #343a40, stop:1 #23272b);
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 8px;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+            }
+        """)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        
+        # قائمة السياق للحذف
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        self.main_layout.addWidget(self.table)
+        
+        # تحميل البيانات
+        self.load_requests()
+    
+    def load_requests(self):
+        """تحميل الطلبات من قاعدة البيانات"""
+        requests = wir_db.get_all_requests()
+        self.table.setRowCount(len(requests))
+        
+        for i, req in enumerate(requests):
+            self.table.setItem(i, 0, QTableWidgetItem(str(req['id'])))
+            self.table.setItem(i, 1, QTableWidgetItem(req['ref']))
+            self.table.setItem(i, 2, QTableWidgetItem(f"REV{req['rev']:02d}"))
+            self.table.setItem(i, 3, QTableWidgetItem(str(req['plot'])))
+            self.table.setItem(i, 4, QTableWidgetItem(req['discipline']))
+            self.table.setItem(i, 5, QTableWidgetItem(req['description']))
+            self.table.setItem(i, 6, QTableWidgetItem(req['suffix']))
+            self.table.setItem(i, 7, QTableWidgetItem(req['date']))
+            self.table.setItem(i, 8, QTableWidgetItem(req['time']))
+            
+            # تلوين الصفوف حسب التخصص
+            disc_colors = {
+                'AR': '#e3f2fd',
+                'CV': '#e8f5e9',
+                'MECH': '#fff3e0',
+                'ELEC': '#fce4ec'
+            }
+            bg_color = disc_colors.get(req['discipline'], '#ffffff')
+            for col in range(9):
+                item = self.table.item(i, col)
+                if item:
+                    item.setBackground(QColor(bg_color))
+    
+    def show_context_menu(self, pos):
+        """عرض قائمة السياق للحذف"""
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        
+        menu = QMenu(self)
+        delete_action = menu.addAction("🗑️ حذف هذا الطلب")
+        
+        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if action == delete_action:
+            item_id = int(self.table.item(row, 0).text())
+            reply = QMessageBox.question(
+                self, "تأكيد الحذف",
+                f"هل أنت متأكد من حذف الطلب رقم {item_id}؟",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                wir_db.delete_request(item_id)
+                self.load_requests()
+    
+    def export_csv(self):
+        """تصدير السجل إلى ملف CSV"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "تصدير إلى CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if file_path:
+            if not file_path.endswith('.csv'):
+                file_path += '.csv'
+            if wir_db.export_to_csv(file_path):
+                QMessageBox.information(self, "نجاح", f"تم تصدير السجل إلى:\n{file_path}")
+            else:
+                QMessageBox.warning(self, "تحذير", "لا توجد بيانات لتصديرها أو حدث خطأ")
+    
+    def clear_log(self):
+        """مسح جميع السجلات"""
+        if wir_db.get_all_requests():
+            reply = QMessageBox.warning(
+                self, "تأكيد المسح",
+                "هل أنت متأكد من مسح جميع سجلات الطلبات؟\nلا يمكن التراجع عن هذا الإجراء!",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                wir_db.clear_all()
+                self.load_requests()
 
 # -------------------- كلاس التبويب (DisciplineTab) --------------------
 class DisciplineTab(QWidget):
@@ -2614,6 +2937,11 @@ class MainWindow(QMainWindow):
             tab = DisciplineTab(code, name, self)
             self.tabs.addTab(tab, name)
             self.disc_widgets.append(tab)
+        
+        # إضافة تبويب سجل طلبات WIR
+        self.wir_log_tab = WIRLogTab(self)
+        self.tabs.addTab(self.wir_log_tab, "📋 سجل الطلبات")
+        
         main_layout.addWidget(self.tabs, 1)  # stretch=1 يخليها تملأ المساحة
 
         self.btn_run = QPushButton("▶️ بدء توليد كافة الملفات")
@@ -3203,6 +3531,10 @@ class MainWindow(QMainWindow):
         """تحديث قوائم الاقتراحات في جميع التبويبات"""
         for tab in self.disc_widgets:
             tab.refresh_suggestions()
+        
+        # تحديث تبويب سجل الطلبات WIR
+        if hasattr(self, 'wir_log_tab'):
+            self.wir_log_tab.load_requests()
 
     def open_output_folder(self):
         output_path = os.path.abspath("Output")
