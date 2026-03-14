@@ -64,11 +64,10 @@ def apply_rtl_lock(text):
     return f"\u202b{text}\u202c"
 
 def convert_docx_to_pdf(word_app, docx_path, pdf_path):
-    """Convert DOCX to PDF using Word COM object"""
     docx_path = os.path.abspath(docx_path)
     pdf_path = os.path.abspath(pdf_path)
-    doc = word_app.Documents.Open(docx_path, ReadOnly=True)
-    doc.ExportAsFixedFormat(2, pdf_path)  # 2 = PDF format
+    doc = word_app.Documents.Open(docx_path)
+    doc.SaveAs(pdf_path, FileFormat=17)
     doc.Close()
     return True
 
@@ -229,70 +228,58 @@ class WorkerThread(QThread):
         merger = PdfWriter()
         readers = []  # نحتفظ بالـ readers مفتوحة حتى بعد الكتابة
         try:
-            # Add main document first
-            with open(temp_pdf, 'rb') as f:
-                merger.append(fileobj=f)
-            
+            merger.append(temp_pdf)
             for ap, pages_range in attach_paths_with_pages:
                 if not ap or not os.path.exists(ap):
                     continue
-                
-                # If no page range specified, append entire document
-                if not pages_range or not pages_range.strip():
-                    with open(ap, 'rb') as f:
-                        merger.append(fileobj=f)
-                    continue
-                
-                # Process page ranges
-                reader = PdfReader(ap)
-                readers.append(reader)
-                
-                # تنظيف النطاق: استبدال الفواصل المختلفة بفواصل إنجليزية
-                cleaned_range = pages_range.replace('،', ',').replace('.', ',').replace('*', ',').replace(' ', '')
-                
-                try:
-                    total_pages = len(reader.pages)
-                    pages_to_extract = set()
-                    
-                    for part in cleaned_range.split(','):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        
-                        if '-' in part:
-                            # معالجة النطاق مثل 1-3
-                            try:
-                                start, end = part.split('-')
-                                start = int(start.strip()) - 1
-                                end = int(end.strip()) - 1
-                                if start < 0:
-                                    start = 0
-                                if end >= total_pages:
-                                    end = total_pages - 1
-                                if start <= end:
-                                    pages_to_extract.update(range(start, end+1))
-                            except ValueError:
-                                # إذا كان التنسيق غير صحيح، تجاهل هذا الجزء
+                if pages_range and pages_range.strip():
+                    # تنظيف النطاق: استبدال الفواصل المختلفة بفواصل إنجليزية
+                    cleaned_range = pages_range.replace('،', ',').replace('.', ',').replace('*', ',').replace(' ', '')
+                    try:
+                        reader = PdfReader(ap)
+                        readers.append(reader)  # نحتفظ بالـ reader مفتوحاً
+                        total_pages = len(reader.pages)
+                        pages_to_extract = []
+                        for part in cleaned_range.split(','):
+                            part = part.strip()
+                            if not part:
                                 continue
+                            if '-' in part:
+                                # معالجة النطاق مثل 1-3
+                                try:
+                                    start, end = part.split('-')
+                                    start = int(start.strip()) - 1
+                                    end = int(end.strip()) - 1
+                                    if start < 0:
+                                        start = 0
+                                    if end >= total_pages:
+                                        end = total_pages - 1
+                                    if start <= end:
+                                        pages_to_extract.extend(range(start, end+1))
+                                except ValueError:
+                                    # إذا كان التنسيق غير صحيح، تجاهل هذا الجزء
+                                    continue
+                            else:
+                                if part.isdigit():
+                                    p = int(part) - 1
+                                    if 0 <= p < total_pages:
+                                        pages_to_extract.append(p)
+                        # إزالة التكرار والترتيب
+                        pages_to_extract = sorted(set(pages_to_extract))
+                        if pages_to_extract:
+                            for p in pages_to_extract:
+                                merger.add_page(reader.pages[p])  # ← الإصلاح: add_page بدل append
                         else:
-                            if part.isdigit():
-                                p = int(part) - 1
-                                if 0 <= p < total_pages:
-                                    pages_to_extract.add(p)
-                    
-                    # Add extracted pages in order
-                    for p in sorted(pages_to_extract):
-                        merger.add_page(reader.pages[p])
-                    
-                except Exception as e:
-                    log_error(f"خطأ في استخراج الصفحات من {ap}: {e}")
-                    # في حالة الخطأ، ندمج الملف كاملاً
-                    with open(ap, 'rb') as f:
-                        merger.append(fileobj=f)
-            
+                            # إذا لم يتم استخراج أي صفحة، نستخدم الملف كاملاً (تحسباً)
+                            merger.append(ap)
+                    except Exception as e:
+                        log_error(f"خطأ في استخراج الصفحات من {ap}: {e}")
+                        # في حالة الخطأ، ندمج الملف كاملاً
+                        merger.append(ap)
+                else:
+                    merger.append(ap)
             with open(final_pdf, 'wb') as f:
                 merger.write(f)
-                
         finally:
             merger.close()
             # إغلاق جميع الـ readers بعد الكتابة
@@ -2181,7 +2168,7 @@ class DisciplineTab(QWidget):
                 if plots_text:
                     summary_parts.append(f"قطع: {plots_text}")
 
-        suffix_text = re.sub(r'[\r\n\t]', ' ', row['suffix'].text()).strip()
+        suffix_text = row['suffix'].text().strip()
         if suffix_text:
             summary_parts.append(f"({suffix_text})")
 
@@ -2218,7 +2205,7 @@ class DisciplineTab(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("WIR Toilets Project by Yasser Hamouda v3.4")  # تحديث الإصدار
+        self.setWindowTitle("WIR Toilets Project by Yasser Hamouda v3.9")  # تحديث الإصدار
         self.setWindowIcon(QIcon(resource_path("icon.ico")))  # تعيين أيقونة البرنامج
         self.setGeometry(100, 100, 1400, 900)  # تم تعديل الارتفاع إلى 900
         self.setLayoutDirection(Qt.RightToLeft)
