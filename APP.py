@@ -1010,6 +1010,9 @@ class WIRLogTab(QWidget):
             table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
             table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
             
+            # منع التعديلات اليدوية على الخلايا
+            table.setEditTriggers(QTableWidget.NoEditTriggers)
+            
             # قائمة السياق للحذف
             table.setContextMenuPolicy(Qt.CustomContextMenu)
             table.customContextMenuRequested.connect(lambda pos, t=table: self.show_context_menu(pos, t))
