@@ -982,7 +982,15 @@ class WIRLogWindow(QMainWindow):
             ])
             
             header = table.horizontalHeader()
-            header.setSectionResizeMode(QHeaderView.Stretch)
+            # تمكين تغيير حجم الأعمدة يدويًا مع ضبط مبدئي مناسب
+            header.setSectionResizeMode(QHeaderView.Interactive)
+            # ضبط العرض المبدئي للأعمدة
+            header.resizeSection(0, 50)   # م
+            header.resizeSection(1, 120)  # رقم الطلب
+            header.resizeSection(2, 100)  # رقم القطعة
+            header.resizeSection(3, 300)  # الوصف
+            header.resizeSection(4, 80)   # النوع
+            header.resizeSection(5, 100)  # التاريخ
             header.setStyleSheet("""
                 QHeaderView::section {
                     background-color: #f8f9fa;
