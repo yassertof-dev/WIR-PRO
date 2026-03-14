@@ -976,10 +976,10 @@ class WIRLogWindow(QMainWindow):
         
         for code, name in disciplines:
             table = QTableWidget()
-            table.setColumnCount(9)
+            table.setColumnCount(6)
             table.setHorizontalHeaderLabels([
                 "م", "رقم الطلب", "رقم القطعة", "الوصف", 
-                "النوع", "التاريخ", "الوقت", "التخصص", "اسم المهندس"
+                "النوع", "التاريخ"
             ])
             
             header = table.horizontalHeader()
@@ -1061,7 +1061,7 @@ class WIRLogWindow(QMainWindow):
                     }
                     bg_color = color_map.get(req.get('discipline', ''), '#FFFFFF')
                     
-                    for col in range(9):
+                    for col in range(6):
                         item = QTableWidgetItem("")
                         item.setBackground(QColor(bg_color))
                         table.setItem(row_pos, col, item)
@@ -1084,17 +1084,6 @@ class WIRLogWindow(QMainWindow):
                     # التاريخ
                     table.item(row_pos, 5).setTextAlignment(Qt.AlignCenter)
                     table.item(row_pos, 5).setText(req.get('date', ''))
-                    # الوقت
-                    table.item(row_pos, 6).setTextAlignment(Qt.AlignCenter)
-                    table.item(row_pos, 6).setText(req.get('time', ''))
-                    # التخصص
-                    table.item(row_pos, 7).setTextAlignment(Qt.AlignCenter)
-                    table.item(row_pos, 7).setText(req.get('discipline', ''))
-                    # اسم المهندس (من النافذة الرئيسية إذا متاحة)
-                    engineer = ""
-                    if self.main_window and hasattr(self.main_window, 'engineer_input'):
-                        engineer = self.main_window.engineer_input.text()
-                    table.item(row_pos, 8).setText(engineer)
         
         except Exception as e:
             QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء تحميل البيانات:\n{str(e)}")
