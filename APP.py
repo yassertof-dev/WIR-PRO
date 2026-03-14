@@ -887,7 +887,7 @@ class WIRLogTab(QWidget):
             QPushButton:hover { background-color: #138496; }
             QPushButton:pressed { background-color: #117a8b; }
         """)
-        self.btn_refresh.clicked.connect(self.load_requests)
+        self.btn_refresh.clicked.connect(self.load_all_requests)
         
         # زر تصدير CSV
         self.btn_export = QPushButton("📄 تصدير CSV")
@@ -908,7 +908,7 @@ class WIRLogTab(QWidget):
         self.btn_export.clicked.connect(self.export_csv)
         
         # زر مسح السجل
-        self.btn_clear = QPushButton("🗑️ مسح السجل")
+        self.btn_clear = QPushButton("🗑️ مسح الكل")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.setStyleSheet("""
             QPushButton {
@@ -931,75 +931,122 @@ class WIRLogTab(QWidget):
         top_layout.addWidget(self.btn_clear)
         self.main_layout.addWidget(top_bar)
         
-        # جدول العرض
-        self.table = QTableWidget()
-        self.table.setColumnCount(9)
-        self.table.setHorizontalHeaderLabels([
-            'م', 'الرقم المرجعي', 'المراجعة', 'القطعة', 'التخصص',
-            'الوصف', 'اللاحقة', 'التاريخ', 'الوقت'
-        ])
-        self.table.setStyleSheet("""
-            QTableWidget {
-                background-color: white;
+        # نظام التبويبات حسب التخصص
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
                 border: 1px solid #dee2e6;
                 border-radius: 8px;
-                gridline-color: #e9ecef;
-                font-size: 13px;
+                background-color: white;
             }
-            QTableWidget::item {
-                padding: 8px;
-                border: none;
-            }
-            QTableWidget::item:selected {
-                background-color: #0d6efd;
-                color: white;
-            }
-            QHeaderView::section {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #343a40, stop:1 #23272b);
-                color: white;
+            QTabBar::tab {
+                background-color: #e9ecef;
+                color: #495057;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
                 font-weight: bold;
                 font-size: 13px;
-                padding: 8px;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #343a40;
+                color: white;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #dee2e6;
             }
         """)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         
-        # قائمة السياق للحذف
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        # تعريف التخصصات وألوانها
+        self.disciplines = [
+            ('ALL', 'كل الطلبات'),
+            ('AR', 'معماري - AR'),
+            ('CV', 'مدني - CV'),
+            ('MECH', 'ميكانيكا - MECH'),
+            ('ELEC', 'كهرباء - ELEC')
+        ]
         
-        self.main_layout.addWidget(self.table)
+        self.tables = {}
+        for disc_code, disc_name in self.disciplines:
+            table = QTableWidget()
+            table.setColumnCount(8)
+            table.setHorizontalHeaderLabels([
+                'م', 'الرقم المرجعي', 'المراجعة', 'القطعة',
+                'الوصف', 'اللاحقة', 'التاريخ', 'الوقت'
+            ])
+            table.setStyleSheet("""
+                QTableWidget {
+                    background-color: white;
+                    border: none;
+                    gridline-color: #e9ecef;
+                    font-size: 13px;
+                }
+                QTableWidget::item {
+                    padding: 8px;
+                    border: none;
+                }
+                QTableWidget::item:selected {
+                    background-color: #0d6efd;
+                    color: white;
+                }
+                QHeaderView::section {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #343a40, stop:1 #23272b);
+                    color: white;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 8px;
+                    border: 1px solid #dee2e6;
+                }
+            """)
+            table.setAlternatingRowColors(True)
+            table.setSelectionBehavior(QTableWidget.SelectRows)
+            table.setSelectionMode(QTableWidget.SingleSelection)
+            table.verticalHeader().setVisible(False)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            
+            # قائمة السياق للحذف
+            table.setContextMenuPolicy(Qt.CustomContextMenu)
+            table.customContextMenuRequested.connect(lambda pos, t=table: self.show_context_menu(pos, t))
+            
+            self.tables[disc_code] = table
+            self.tabs.addTab(table, disc_name)
+        
+        self.main_layout.addWidget(self.tabs)
         
         # تحميل البيانات
-        self.load_requests()
+        self.load_all_requests()
     
-    def load_requests(self):
-        """تحميل الطلبات من قاعدة البيانات"""
+    def load_all_requests(self):
+        """تحميل الطلبات في جميع التبويبات"""
+        for disc_code in self.tables:
+            self.load_requests(disc_code)
+    
+    def load_requests(self, discipline='ALL'):
+        """تحميل الطلبات من قاعدة البيانات حسب التخصص"""
         requests = wir_db.get_all_requests()
-        self.table.setRowCount(len(requests))
+        table = self.tables[discipline]
+        
+        # فلترة حسب التخصص إذا لم يكن 'ALL'
+        if discipline != 'ALL':
+            requests = [r for r in requests if r['discipline'] == discipline]
+        
+        table.setRowCount(len(requests))
         
         for i, req in enumerate(requests):
-            self.table.setItem(i, 0, QTableWidgetItem(str(req['id'])))
-            self.table.setItem(i, 1, QTableWidgetItem(req['ref']))
-            self.table.setItem(i, 2, QTableWidgetItem(f"REV{req['rev']:02d}"))
-            self.table.setItem(i, 3, QTableWidgetItem(str(req['plot'])))
-            self.table.setItem(i, 4, QTableWidgetItem(req['discipline']))
-            self.table.setItem(i, 5, QTableWidgetItem(req['description']))
-            self.table.setItem(i, 6, QTableWidgetItem(req['suffix']))
-            self.table.setItem(i, 7, QTableWidgetItem(req['date']))
-            self.table.setItem(i, 8, QTableWidgetItem(req['time']))
+            table.setItem(i, 0, QTableWidgetItem(str(req['id'])))
+            table.setItem(i, 1, QTableWidgetItem(req['ref']))
+            table.setItem(i, 2, QTableWidgetItem(f"REV{req['rev']:02d}"))
+            table.setItem(i, 3, QTableWidgetItem(str(req['plot'])))
+            table.setItem(i, 4, QTableWidgetItem(req['description']))
+            table.setItem(i, 5, QTableWidgetItem(req['suffix']))
+            table.setItem(i, 6, QTableWidgetItem(req['date']))
+            table.setItem(i, 7, QTableWidgetItem(req['time']))
             
             # تلوين الصفوف حسب التخصص
             disc_colors = {
@@ -1009,23 +1056,27 @@ class WIRLogTab(QWidget):
                 'ELEC': '#fce4ec'
             }
             bg_color = disc_colors.get(req['discipline'], '#ffffff')
-            for col in range(9):
-                item = self.table.item(i, col)
+            for col in range(8):
+                item = table.item(i, col)
                 if item:
                     item.setBackground(QColor(bg_color))
     
-    def show_context_menu(self, pos):
+    def show_context_menu(self, pos, table=None):
         """عرض قائمة السياق للحذف"""
-        row = self.table.rowAt(pos.y())
+        if table is None:
+            # الحصول على الجدول النشط حاليًا
+            table = self.tabs.currentWidget()
+        
+        row = table.rowAt(pos.y())
         if row < 0:
             return
         
         menu = QMenu(self)
         delete_action = menu.addAction("🗑️ حذف هذا الطلب")
         
-        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        action = menu.exec_(table.viewport().mapToGlobal(pos))
         if action == delete_action:
-            item_id = int(self.table.item(row, 0).text())
+            item_id = int(table.item(row, 0).text())
             reply = QMessageBox.question(
                 self, "تأكيد الحذف",
                 f"هل أنت متأكد من حذف الطلب رقم {item_id}؟",
@@ -1033,7 +1084,7 @@ class WIRLogTab(QWidget):
             )
             if reply == QMessageBox.Yes:
                 wir_db.delete_request(item_id)
-                self.load_requests()
+                self.load_all_requests()
     
     def export_csv(self):
         """تصدير السجل إلى ملف CSV"""
@@ -1058,7 +1109,7 @@ class WIRLogTab(QWidget):
             )
             if reply == QMessageBox.Yes:
                 wir_db.clear_all()
-                self.load_requests()
+                self.load_all_requests()
 
 # -------------------- كلاس التبويب (DisciplineTab) --------------------
 class DisciplineTab(QWidget):
