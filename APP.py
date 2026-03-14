@@ -130,7 +130,6 @@ class WIRDatabase:
             'description': description,
             'suffix': suffix,
             'date': date,
-            'time': time,
             'attachments': attachments or [],
             'created_at': datetime.datetime.now().isoformat()
         }
@@ -1163,7 +1162,7 @@ class WIRLogWindow(QMainWindow):
     def delete_request(self, row, table):
         """حذف طلب محدد من الجدول وملف JSON"""
         try:
-            request_number = table.item(row, 1).text()
+            request_ref = table.item(row, 1).text()
             
             json_path = os.path.join(os.path.dirname(__file__), "wir_requests.json")
             if not os.path.exists(json_path):
@@ -1172,8 +1171,8 @@ class WIRLogWindow(QMainWindow):
             with open(json_path, 'r', encoding='utf-8') as f:
                 requests = json.load(f)
             
-            # تصفية الطلبات واستبعاد المطلوب حذفه
-            updated_requests = [req for req in requests if req.get('request_number') != request_number]
+            # تصفية الطلبات واستبعاد المطلوب حذفه بناءً على ref
+            updated_requests = [req for req in requests if req.get('ref') != request_ref]
             
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(updated_requests, f, ensure_ascii=False, indent=2)
