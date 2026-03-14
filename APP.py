@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QGroupBox, QFormLayout,
                              QTextEdit, QProgressBar, QListWidget, QListWidgetItem,
                              QFrame, QMenu, QSizePolicy, QStyleFactory,
-                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter, QInputDialog)
+                             QCalendarWidget, QDialog, QAbstractItemView, QCompleter, QInputDialog,
+                             QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import (Qt, QDate, QThread, pyqtSignal, QLocale, QPoint, QMimeData, QObject, QStringListModel)
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QDragEnterEvent, QDropEvent, QWheelEvent, QIcon
 
@@ -931,7 +932,6 @@ class WIRLogTab(QWidget):
         self.main_layout.addWidget(top_bar)
         
         # جدول العرض
-        from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView, QHBoxLayout
         self.table = QTableWidget()
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
