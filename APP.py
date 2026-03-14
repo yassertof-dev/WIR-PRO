@@ -1045,56 +1045,56 @@ class WIRLogWindow(QMainWindow):
                     requests_by_discipline[discipline].append(req)
                 requests_by_discipline["ALL"].append(req)
             
-        # عرض الطلبات في كل تبويب
-        for code, table in self.tables.items():
-            disc_requests = requests_by_discipline.get(code, [])
-            for idx, req in enumerate(disc_requests, 1):
-                row_pos = table.rowCount()
-                table.insertRow(row_pos)
-                
-                # تلوين الصف حسب التخصص
-                color_map = {
-                    "AR": "#FFF3CD",
-                    "CV": "#D1ECF1",
-                    "MECH": "#D4EDDA",
-                    "ELEC": "#F8D7DA"
-                }
-                bg_color = color_map.get(req.get('discipline', ''), '#FFFFFF')
-                
-                for col in range(9):
-                    item = QTableWidgetItem("")
-                    item.setBackground(QColor(bg_color))
-                    table.setItem(row_pos, col, item)
-                
-                table.item(row_pos, 0).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 0).setText(str(idx))
-                # رقم الطلب = Ref-Rev
-                ref = req.get('ref', '')
-                rev = req.get('rev', '')
-                request_num = f"{ref}-{rev}" if rev else ref
-                table.item(row_pos, 1).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 1).setText(request_num)
-                # رقم القطعة
-                table.item(row_pos, 2).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 2).setText(req.get('plot', ''))
-                # الوصف
-                table.item(row_pos, 3).setText(req.get('description', ''))
-                # النوع (Suffix)
-                table.item(row_pos, 4).setText(req.get('suffix', ''))
-                # التاريخ
-                table.item(row_pos, 5).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 5).setText(req.get('date', ''))
-                # الوقت
-                table.item(row_pos, 6).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 6).setText(req.get('time', ''))
-                # التخصص
-                table.item(row_pos, 7).setTextAlignment(Qt.AlignCenter)
-                table.item(row_pos, 7).setText(req.get('discipline', ''))
-                # اسم المهندس (من النافذة الرئيسية إذا متاحة)
-                engineer = ""
-                if self.main_window and hasattr(self.main_window, 'engineer_input'):
-                    engineer = self.main_window.engineer_input.text()
-                table.item(row_pos, 8).setText(engineer)
+            # عرض الطلبات في كل تبويب
+            for code, table in self.tables.items():
+                disc_requests = requests_by_discipline.get(code, [])
+                for idx, req in enumerate(disc_requests, 1):
+                    row_pos = table.rowCount()
+                    table.insertRow(row_pos)
+                    
+                    # تلوين الصف حسب التخصص
+                    color_map = {
+                        "AR": "#FFF3CD",
+                        "CV": "#D1ECF1",
+                        "MECH": "#D4EDDA",
+                        "ELEC": "#F8D7DA"
+                    }
+                    bg_color = color_map.get(req.get('discipline', ''), '#FFFFFF')
+                    
+                    for col in range(9):
+                        item = QTableWidgetItem("")
+                        item.setBackground(QColor(bg_color))
+                        table.setItem(row_pos, col, item)
+                    
+                    table.item(row_pos, 0).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 0).setText(str(idx))
+                    # رقم الطلب = Ref-Rev
+                    ref = req.get('ref', '')
+                    rev = req.get('rev', '')
+                    request_num = f"{ref}-{rev}" if rev else ref
+                    table.item(row_pos, 1).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 1).setText(request_num)
+                    # رقم القطعة
+                    table.item(row_pos, 2).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 2).setText(req.get('plot', ''))
+                    # الوصف
+                    table.item(row_pos, 3).setText(req.get('description', ''))
+                    # النوع (Suffix)
+                    table.item(row_pos, 4).setText(req.get('suffix', ''))
+                    # التاريخ
+                    table.item(row_pos, 5).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 5).setText(req.get('date', ''))
+                    # الوقت
+                    table.item(row_pos, 6).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 6).setText(req.get('time', ''))
+                    # التخصص
+                    table.item(row_pos, 7).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 7).setText(req.get('discipline', ''))
+                    # اسم المهندس (من النافذة الرئيسية إذا متاحة)
+                    engineer = ""
+                    if self.main_window and hasattr(self.main_window, 'engineer_input'):
+                        engineer = self.main_window.engineer_input.text()
+                    table.item(row_pos, 8).setText(engineer)
         
         except Exception as e:
             QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء تحميل البيانات:\n{str(e)}")
