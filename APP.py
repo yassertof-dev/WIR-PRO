@@ -990,9 +990,9 @@ class WIRLogWindow(QMainWindow):
             header = table.horizontalHeader()
             # تمكين تغيير حجم الأعمدة يدويًا مع ضبط مبدئي مناسب
             header.setSectionResizeMode(QHeaderView.Interactive)
-            # ضبط العرض المبدئي للأعمدة
+            # ضبط العرض المبدئي للأعمدة - العمود 1 (اسم الملف) بحسب المحتوى
             header.resizeSection(0, 50)   # م
-            header.resizeSection(1, 200)  # اسم الملف
+            header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # اسم الملف - Fit to content
             header.resizeSection(2, 100)  # رقم القطعة
             header.resizeSection(3, 300)  # الوصف
             header.resizeSection(4, 80)   # النوع
@@ -1188,22 +1188,35 @@ class WIRLogWindow(QMainWindow):
     def open_file_from_log(self, filename):
         """فتح الملف المولد من سجل الطلبات"""
         try:
-            # البحث عن الملف في مجلد الإخراج
+            # البحث عن الملف في مجلد الإخراج - Output داخل مجلد التخصص
             output_dir = os.path.join(os.path.dirname(__file__), "Output")
+            
+            # محاولة البحث أولاً في Output مباشرة
             file_path = os.path.join(output_dir, filename)
             
             if os.path.exists(file_path):
                 os.startfile(file_path)
-            else:
-                # محاولة البحث في المجلد الحالي
-                file_path = os.path.join(os.path.dirname(__file__), filename)
-                if os.path.exists(file_path):
-                    os.startfile(file_path)
-                else:
-                    QMessageBox.warning(
-                        self, "ملف غير موجود",
-                        f"لم يتم العثور على الملف:\n{filename}\n\nتأكد من وجود الملف في مجلد Output"
-                    )
+                return
+            
+            # إذا لم يوجد، نحاول البحث في subfolders داخل Output (مجلدات التخصصات)
+            if os.path.exists(output_dir):
+                for root, dirs, files in os.walk(output_dir):
+                    if filename in files:
+                        file_path = os.path.join(root, filename)
+                        os.startfile(file_path)
+                        return
+            
+            # محاولة البحث في المجلد الحالي كحل أخير
+            file_path = os.path.join(os.path.dirname(__file__), filename)
+            if os.path.exists(file_path):
+                os.startfile(file_path)
+                return
+            
+            # إذا لم نجد الملف، نعرض رسالة تحذير
+            QMessageBox.warning(
+                self, "ملف غير موجود",
+                f"لم يتم العثور على الملف:\n{filename}\n\nمسار البحث: {output_dir}\n\nتأكد من وجود الملف في مجلد Output أو أحد مجلدات التخصصات بداخله"
+            )
         except Exception as e:
             log_error(f"Failed to open file from log: {e}")
             QMessageBox.critical(
@@ -1499,22 +1512,35 @@ class WIRLogTab(QWidget):
     def open_file_from_log(self, filename):
         """فتح الملف المولد من سجل الطلبات"""
         try:
-            # البحث عن الملف في مجلد الإخراج
+            # البحث عن الملف في مجلد الإخراج - Output داخل مجلد التخصص
             output_dir = os.path.join(os.path.dirname(__file__), "Output")
+            
+            # محاولة البحث أولاً في Output مباشرة
             file_path = os.path.join(output_dir, filename)
             
             if os.path.exists(file_path):
                 os.startfile(file_path)
-            else:
-                # محاولة البحث في المجلد الحالي
-                file_path = os.path.join(os.path.dirname(__file__), filename)
-                if os.path.exists(file_path):
-                    os.startfile(file_path)
-                else:
-                    QMessageBox.warning(
-                        self, "ملف غير موجود",
-                        f"لم يتم العثور على الملف:\n{filename}\n\nتأكد من وجود الملف في مجلد Output"
-                    )
+                return
+            
+            # إذا لم يوجد، نحاول البحث في subfolders داخل Output (مجلدات التخصصات)
+            if os.path.exists(output_dir):
+                for root, dirs, files in os.walk(output_dir):
+                    if filename in files:
+                        file_path = os.path.join(root, filename)
+                        os.startfile(file_path)
+                        return
+            
+            # محاولة البحث في المجلد الحالي كحل أخير
+            file_path = os.path.join(os.path.dirname(__file__), filename)
+            if os.path.exists(file_path):
+                os.startfile(file_path)
+                return
+            
+            # إذا لم نجد الملف، نعرض رسالة تحذير
+            QMessageBox.warning(
+                self, "ملف غير موجود",
+                f"لم يتم العثور على الملف:\n{filename}\n\nمسار البحث: {output_dir}\n\nتأكد من وجود الملف في مجلد Output أو أحد مجلدات التخصصات بداخله"
+            )
         except Exception as e:
             log_error(f"Failed to open file from log: {e}")
             QMessageBox.critical(
