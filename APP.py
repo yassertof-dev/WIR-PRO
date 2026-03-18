@@ -167,11 +167,17 @@ class WIRDatabase:
         try:
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
-                writer.writerow(['م', 'الرقم المرجعي', 'المراجعة', 'القطعة', 'التخصص', 
-                               'الوصف', 'اللاحقة', 'التاريخ', 'الوقت', 'عدد المرفقات'])
+                writer.writerow(['م', 'اسم الملف', 'الرقم المرجعي', 'المراجعة', 'القطعة', 
+                               'التخصص', 'الوصف', 'النوع', 'التاريخ', 'الوقت', 'عدد المرفقات'])
                 for r in self.requests:
+                    ref = r.get('ref', '')
+                    rev = r.get('rev', 0)
+                    plot = str(r.get('plot', ''))
+                    suffix = r.get('suffix', '')
+                    base = f"{ref}-REV{rev:02d}" if rev > 0 else ref
+                    filename = f"{base}-{plot}-{suffix}.pdf" if suffix else f"{base}-{plot}.pdf"
                     writer.writerow([
-                        r['id'], r['ref'], f"REV{r['rev']:02d}", r['plot'],
+                        r['id'], filename, r['ref'], f"REV{r['rev']:02d}", r['plot'],
                         r['discipline'], r['description'], r['suffix'],
                         r['date'], r['time'], len(r.get('attachments', []))
                     ])
@@ -975,10 +981,10 @@ class WIRLogWindow(QMainWindow):
         
         for code, name in disciplines:
             table = QTableWidget()
-            table.setColumnCount(6)
+            table.setColumnCount(7)
             table.setHorizontalHeaderLabels([
-                "م", "رقم الطلب", "رقم القطعة", "الوصف", 
-                "النوع", "التاريخ"
+                "م", "اسم الملف", "رقم القطعة", "الوصف", 
+                "النوع", "التاريخ", "المراجعة"
             ])
             
             header = table.horizontalHeader()
@@ -986,11 +992,12 @@ class WIRLogWindow(QMainWindow):
             header.setSectionResizeMode(QHeaderView.Interactive)
             # ضبط العرض المبدئي للأعمدة
             header.resizeSection(0, 50)   # م
-            header.resizeSection(1, 120)  # رقم الطلب
+            header.resizeSection(1, 200)  # اسم الملف
             header.resizeSection(2, 100)  # رقم القطعة
             header.resizeSection(3, 300)  # الوصف
             header.resizeSection(4, 80)   # النوع
             header.resizeSection(5, 100)  # التاريخ
+            header.resizeSection(6, 80)   # المراجعة
             header.setStyleSheet("""
                 QHeaderView::section {
                     background-color: #f8f9fa;
@@ -1068,19 +1075,22 @@ class WIRLogWindow(QMainWindow):
                     }
                     bg_color = color_map.get(req.get('discipline', ''), '#FFFFFF')
                     
-                    for col in range(6):
+                    for col in range(7):
                         item = QTableWidgetItem("")
                         item.setBackground(QColor(bg_color))
                         table.setItem(row_pos, col, item)
                     
                     table.item(row_pos, 0).setTextAlignment(Qt.AlignCenter)
                     table.item(row_pos, 0).setText(str(idx))
-                    # رقم الطلب = Ref-Rev
+                    # اسم الملف (العمود 1)
                     ref = req.get('ref', '')
-                    rev = req.get('rev', '')
-                    request_num = f"{ref}-{rev}" if rev else ref
-                    table.item(row_pos, 1).setTextAlignment(Qt.AlignCenter)
-                    table.item(row_pos, 1).setText(request_num)
+                    rev = req.get('rev', 0)
+                    plot = str(req.get('plot', ''))
+                    suffix = req.get('suffix', '')
+                    base = f"{ref}-REV{rev:02d}" if rev > 0 else ref
+                    filename = f"{base}-{plot}-{suffix}.pdf" if suffix else f"{base}-{plot}.pdf"
+                    table.item(row_pos, 1).setTextAlignment(Qt.AlignLeft)
+                    table.item(row_pos, 1).setText(filename)
                     # رقم القطعة
                     table.item(row_pos, 2).setTextAlignment(Qt.AlignCenter)
                     table.item(row_pos, 2).setText(req.get('plot', ''))
@@ -1091,6 +1101,9 @@ class WIRLogWindow(QMainWindow):
                     # التاريخ
                     table.item(row_pos, 5).setTextAlignment(Qt.AlignCenter)
                     table.item(row_pos, 5).setText(req.get('date', ''))
+                    # المراجعة
+                    table.item(row_pos, 6).setTextAlignment(Qt.AlignCenter)
+                    table.item(row_pos, 6).setText(f"REV{req.get('rev', 0):02d}")
         
         except Exception as e:
             QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء تحميل البيانات:\n{str(e)}")
@@ -1160,17 +1173,48 @@ class WIRLogWindow(QMainWindow):
             return
         
         menu = QMenu(self)
+        open_action = menu.addAction("📂 فتح الملف")
         delete_action = menu.addAction("🗑️ حذف هذا السجل")
         
         action = menu.exec_(table.mapToGlobal(pos))
         
         if action == delete_action:
             self.delete_request(row, table)
+        elif action == open_action:
+            # فتح الملف المولد
+            filename = table.item(row, 1).text()
+            self.open_file_from_log(filename)
+    
+    def open_file_from_log(self, filename):
+        """فتح الملف المولد من سجل الطلبات"""
+        try:
+            # البحث عن الملف في مجلد الإخراج
+            output_dir = os.path.join(os.path.dirname(__file__), "Output")
+            file_path = os.path.join(output_dir, filename)
+            
+            if os.path.exists(file_path):
+                os.startfile(file_path)
+            else:
+                # محاولة البحث في المجلد الحالي
+                file_path = os.path.join(os.path.dirname(__file__), filename)
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                else:
+                    QMessageBox.warning(
+                        self, "ملف غير موجود",
+                        f"لم يتم العثور على الملف:\n{filename}\n\nتأكد من وجود الملف في مجلد Output"
+                    )
+        except Exception as e:
+            log_error(f"Failed to open file from log: {e}")
+            QMessageBox.critical(
+                self, "خطأ",
+                f"حدث خطأ أثناء فتح الملف:\n{str(e)}"
+            )
     
     def delete_request(self, row, table):
         """حذف طلب محدد من الجدول وملف JSON"""
         try:
-            request_ref = table.item(row, 1).text()
+            request_ref = table.item(row, 2).text()  # رقم القطعة الآن في العمود 2
             
             json_path = os.path.join(os.path.dirname(__file__), "wir_requests.json")
             if not os.path.exists(json_path):
@@ -1313,10 +1357,10 @@ class WIRLogTab(QWidget):
         self.tables = {}
         for disc_code, disc_name in self.disciplines:
             table = QTableWidget()
-            table.setColumnCount(8)
+            table.setColumnCount(9)
             table.setHorizontalHeaderLabels([
-                'م', 'الرقم المرجعي', 'المراجعة', 'القطعة',
-                'الوصف', 'اللاحقة', 'التاريخ', 'الوقت'
+                'م', 'اسم الملف', 'الرقم المرجعي', 'المراجعة', 'القطعة',
+                'الوصف', 'النوع', 'التاريخ', 'الوقت'
             ])
             table.setStyleSheet("""
                 QTableWidget {
@@ -1386,13 +1430,28 @@ class WIRLogTab(QWidget):
         
         for i, req in enumerate(requests):
             table.setItem(i, 0, QTableWidgetItem(str(req['id'])))
-            table.setItem(i, 1, QTableWidgetItem(req['ref']))
-            table.setItem(i, 2, QTableWidgetItem(f"REV{req['rev']:02d}"))
-            table.setItem(i, 3, QTableWidgetItem(str(req['plot'])))
-            table.setItem(i, 4, QTableWidgetItem(req['description']))
-            table.setItem(i, 5, QTableWidgetItem(req['suffix']))
-            table.setItem(i, 6, QTableWidgetItem(req['date']))
-            table.setItem(i, 7, QTableWidgetItem(req['time']))
+            # اسم الملف (العمود 1)
+            ref = req.get('ref', '')
+            rev = req.get('rev', 0)
+            plot = str(req.get('plot', ''))
+            suffix = req.get('suffix', '')
+            base = f"{ref}-REV{rev:02d}" if rev > 0 else ref
+            filename = f"{base}-{plot}-{suffix}.pdf" if suffix else f"{base}-{plot}.pdf"
+            table.setItem(i, 1, QTableWidgetItem(filename))
+            # الرقم المرجعي (العمود 2)
+            table.setItem(i, 2, QTableWidgetItem(ref))
+            # المراجعة (العمود 3)
+            table.setItem(i, 3, QTableWidgetItem(f"REV{req['rev']:02d}"))
+            # القطعة (العمود 4)
+            table.setItem(i, 4, QTableWidgetItem(str(req['plot'])))
+            # الوصف (العمود 5)
+            table.setItem(i, 5, QTableWidgetItem(req['description']))
+            # النوع/اللاحقة (العمود 6)
+            table.setItem(i, 6, QTableWidgetItem(req['suffix']))
+            # التاريخ (العمود 7)
+            table.setItem(i, 7, QTableWidgetItem(req['date']))
+            # الوقت (العمود 8)
+            table.setItem(i, 8, QTableWidgetItem(req['time']))
             
             # تلوين الصفوف حسب التخصص
             disc_colors = {
@@ -1402,13 +1461,13 @@ class WIRLogTab(QWidget):
                 'ELEC': '#fce4ec'
             }
             bg_color = disc_colors.get(req['discipline'], '#ffffff')
-            for col in range(8):
+            for col in range(9):
                 item = table.item(i, col)
                 if item:
                     item.setBackground(QColor(bg_color))
     
     def show_context_menu(self, pos, table=None):
-        """عرض قائمة السياق للحذف"""
+        """عرض قائمة السياق للحذف وفتح الملف"""
         if table is None:
             # الحصول على الجدول النشط حاليًا
             table = self.tabs.currentWidget()
@@ -1418,6 +1477,7 @@ class WIRLogTab(QWidget):
             return
         
         menu = QMenu(self)
+        open_action = menu.addAction("📂 فتح الملف")
         delete_action = menu.addAction("🗑️ حذف هذا الطلب")
         
         action = menu.exec_(table.viewport().mapToGlobal(pos))
@@ -1431,6 +1491,36 @@ class WIRLogTab(QWidget):
             if reply == QMessageBox.Yes:
                 wir_db.delete_request(item_id)
                 self.load_all_requests()
+        elif action == open_action:
+            # فتح الملف المولد
+            filename = table.item(row, 1).text()
+            self.open_file_from_log(filename)
+    
+    def open_file_from_log(self, filename):
+        """فتح الملف المولد من سجل الطلبات"""
+        try:
+            # البحث عن الملف في مجلد الإخراج
+            output_dir = os.path.join(os.path.dirname(__file__), "Output")
+            file_path = os.path.join(output_dir, filename)
+            
+            if os.path.exists(file_path):
+                os.startfile(file_path)
+            else:
+                # محاولة البحث في المجلد الحالي
+                file_path = os.path.join(os.path.dirname(__file__), filename)
+                if os.path.exists(file_path):
+                    os.startfile(file_path)
+                else:
+                    QMessageBox.warning(
+                        self, "ملف غير موجود",
+                        f"لم يتم العثور على الملف:\n{filename}\n\nتأكد من وجود الملف في مجلد Output"
+                    )
+        except Exception as e:
+            log_error(f"Failed to open file from log: {e}")
+            QMessageBox.critical(
+                self, "خطأ",
+                f"حدث خطأ أثناء فتح الملف:\n{str(e)}"
+            )
     
     def export_csv(self):
         """تصدير السجل إلى ملف CSV"""
